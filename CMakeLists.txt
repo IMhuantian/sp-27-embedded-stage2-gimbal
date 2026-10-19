@@ -64,6 +64,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     sp_middleware/io/plotter/plotter.cpp
 
     applications/gimbal_task.cpp
+    applications/can_diag.cpp
     applications/fold_task.cpp
     sp_middleware/io/can/can.cpp
     sp_middleware/motor/rm_motor/rm_motor.cpp

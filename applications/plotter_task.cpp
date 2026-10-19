@@ -14,6 +14,7 @@
 //   11 折叠状态码 0 IDLE / 1 FOLDING / 2 FOLDED / 3 UNFOLDING / 4 FAULT
 //   12 折叠电机目标角 rad          13 折叠电机是否被驱动(0/1)
 // (规则书 4.4.2.2 要求的"目标值 / 反馈值 / 控制量"三件套对应 5-10 通道)
+// CAN_DIAG_ENABLE=1 时通道含义见 README「双 CAN 接收诊断模式」，不是下面这张正常云台表。
 extern float plot_ch[14];  // 定义在 applications/gimbal_task.cpp
 
 sp::Plotter plotter(&huart1);

@@ -32,6 +32,9 @@
 #include "gimbal_task.hpp"
 #include "tof_task.hpp"
 
+// 双 CAN 接收诊断模式（默认开启；只收不发）
+#include "can_diag.hpp"
+
 // 定义在 uart_task.cpp / imu_task.cpp
 extern sp::DBus remote;
 extern sp::Mahony imu;
@@ -147,6 +150,12 @@ void fill_plot()
 // 云台电机反馈：GM6020 反馈 ID = id + 0x204，C610/RM2006 反馈 ID = id + 0x200
 extern "C" void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef * hcan)
 {
+#if CAN_DIAG_ENABLE
+  // 诊断模式：按实际外设分发到 CAN1/CAN2，不做单总线入口过滤。
+  can_diag::can_diag_on_rx(hcan);
+  return;
+#endif
+
   if (hcan != kMotorCan) return;
 
   auto now_ms = osKernelSysTick();
@@ -170,6 +179,12 @@ extern "C" void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef * hcan)
 
 extern "C" void gimbal_task()
 {
+#if CAN_DIAG_ENABLE
+  // 双 CAN 通信诊断：旁路正常云台控制与折叠流程；只接收，不发送。
+  can_diag::can_diag_loop(plot_ch);
+  return;
+#endif
+
   if (!GIMBAL_ENABLE) {
     // 未接线 / 未使能：不碰 CAN，只把 IMU 与测距填进波形(4.4.2.1 的调试输出仍然可用)
     disable_all();

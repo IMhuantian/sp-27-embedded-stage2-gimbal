@@ -116,6 +116,67 @@ CAN 帧（每条总线上同一帧最多 4 个电机，同帧写完再 `send`）
 
 帧长 = 3 + 14×4 = **59 字节**，`size = 0x38`。
 
+## 双 CAN 接收诊断模式（`CAN_DIAG_ENABLE=1`，当前默认）
+
+当前构建默认进入诊断模式：`gimbal_task` 先执行 `can_diag` 分支，**不进入正常云台控制/折叠流程**；`GIMBAL_ENABLE` 仍为 false。诊断模式只初始化 CAN1/CAN2 接收，**不发送任何 CAN 帧**（包括 `0x200`/`0x1FF` 零控制帧），诊断路径不创建测试电机对象、不调用 `cmd()`/`send()`，也不自动运动。
+
+当前接线信息：三台电机为两台 GM6020 + 一台 M2006/C610；**底部 GM6020 已确认接 CAN2**。另一台 GM6020 的总线、全部拨码 ID、M2006/C610 的总线/ID 尚无最新确认；旧的 CAN1/ID1、ID2、M2006 ID3 只能作为候选，不能当实物结论。
+
+切回正常云台：把 `applications/can_diag.hpp` 的 `CAN_DIAG_ENABLE` 改为 0；`GIMBAL_ENABLE` 仍按原流程单独确认。
+
+- CAN1 滤波器 bank **0**；CAN2 滤波器 bank **14**，`SlaveStartFilterBank=14`；两路都按 1 Mbps 配置，使用 RX **FIFO0** / `CANx_RX0_IRQn`。
+- `Src/can.c` 的 CAN2 MspInit 会同时使能 CAN1 时钟；`main.c` 先 `MX_CAN1_Init()` 再 `MX_CAN2_Init()`。
+- 回调 `HAL_CAN_RxFifo0MsgPendingCallback` 按实际 `hcan` 分发到 CAN1/CAN2，不再用单总线入口过滤。
+- 候选反馈 ID（只作候选，不自动认定型号）：
+  - GM6020 候选：`0x205 ~ 0x20B`（bit0~bit6）
+  - M2006/C610 候选：`0x201 ~ 0x204`（bit7~bit10）
+- 有效反馈判据：**标准帧 + 数据帧 + DLC=8 + 候选 ID**，且距最近有效帧 <100 ms 才算在线；从未收到帧不算在线。
+- 扩展帧、非候选标准 ID 计入“未知/异常”；候选 ID 但 IDE/RTR/DLC 不合法计入 invalid，不计在线。
+
+### 诊断模式 SerialPlot（仍为 14 通道 / 59 字节）
+
+帧格式不变：`AA BB + size(0x38) + 14×float`，USART1 921600，Custom Frame、First byte size、float32、Little Endian、无校验。
+
+| 通道 | 含义 |
+|---:|---|
+| 0 | CAN1 原始收帧总数（所有 ID） |
+| 1 | CAN2 原始收帧总数（所有 ID） |
+| 2 | CAN1 最后收到的原始 ID（标准或扩展） |
+| 3 | CAN2 最后收到的原始 ID |
+| 4 | CAN1 候选在线位图（bit0~bit10） |
+| 5 | CAN2 候选在线位图 |
+| 6 | CAN1 候选累计有效帧数 |
+| 7 | CAN2 候选累计有效帧数 |
+| 8 | CAN1 在线候选中的最老帧龄 ms（0=无在线候选） |
+| 9 | CAN2 在线候选中的最老帧龄 ms |
+| 10 | CAN1 未知帧 + 候选格式错误帧计数 |
+| 11 | CAN2 未知帧 + 候选格式错误帧计数 |
+| 12 | 状态：0 未初始化 / 1 两路已启动 / 2 初始化或启动失败 / 3 接收错误 |
+| 13 | 最近一个未知 ID（任意总线；0=无或 ID 为 0） |
+
+位图解码：
+
+| bit | ID | 候选 |
+|---:|---:|---|
+| 0~6 | 0x205~0x20B | GM6020 候选 |
+| 7~10 | 0x201~0x204 | M2006/C610 候选 |
+
+逐候选的 `valid_count`、`invalid_count`、`last_valid_ms`，以及未知 ID 小表（每路 16 槽）在调试变量中查看：
+
+```cpp
+can_diag::buses[0] / can_diag::buses[1]
+can_diag::buses[b].candidates[i]
+can_diag::buses[b].unknown[j]
+can_diag::state
+```
+
+限制：
+
+- 同一路上同一个 ID 的计数不能区分两台物理电机；不能凭 ID 自动认定型号。
+- 14 通道给出总线级汇总；逐候选计数/帧龄用调试变量补充，不把通道含义做成滚动表。
+- 诊断模式不会命令 2006/C610 或任何电机；C610 若因无命令进入自身保护，属于预期外设行为。
+- 实际三台是否在线必须由烧录后的真实反馈确认；编译通过不等于通信正常。
+
 ## sp_middleware 说明
 
 本工程把 `sp_middleware`（同济 SuperPower 中间件，上游 `TongjiSuperPower/sp_middleware`，提交 `eddf9a35`）
