@@ -58,13 +58,13 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 
     applications/uart_task.cpp
     applications/tof_task.cpp
-    sp_middleware/io/dbus/dbus.cpp
 
     applications/plotter_task.cpp
     sp_middleware/io/plotter/plotter.cpp
 
     applications/gimbal_task.cpp
     applications/can_diag.cpp
+    applications/gm6020_fold_test.cpp
     applications/fold_task.cpp
     sp_middleware/io/can/can.cpp
     sp_middleware/motor/rm_motor/rm_motor.cpp

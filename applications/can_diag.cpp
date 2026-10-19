@@ -14,6 +14,8 @@ namespace
 constexpr uint32_t kCan1FilterBank = 0;
 constexpr uint32_t kCan2FilterBank = 14;  // CAN2 滤波器从 bank 14 开始
 
+FrameHook frame_hook = nullptr;
+
 int find_candidate(uint32_t id)
 {
   for (int i = 0; i < kCandidateCount; ++i) {
@@ -85,22 +87,32 @@ void can_diag_init()
   state = (can1_ok && can2_ok) ? 1u : 2u;
 }
 
+uint32_t online_mask_for(int bus, uint32_t now_ms)
+{
+  if (bus < 0 || bus >= kBusCount) return 0;
+  uint32_t mask = 0;
+  for (int c = 0; c < kCandidateCount; ++c) {
+    const CandidateStats & cs = buses[bus].candidates[c];
+    if (cs.last_valid_ms == 0) continue;
+    if ((now_ms - cs.last_valid_ms) < kOnlineTimeoutMs) mask |= (1u << c);
+  }
+  return mask;
+}
+
 void fill_plot(float * plot, uint32_t now_ms)
 {
   if (plot == nullptr) return;
 
-  uint32_t online_mask[kBusCount] = {0, 0};
+  uint32_t online[kBusCount] = {0, 0};
   uint32_t oldest_age[kBusCount] = {0, 0};
 
   for (int b = 0; b < kBusCount; ++b) {
+    online[b] = online_mask_for(b, now_ms);
     for (int c = 0; c < kCandidateCount; ++c) {
       const CandidateStats & cs = buses[b].candidates[c];
       if (cs.last_valid_ms == 0) continue;
       const uint32_t age = now_ms - cs.last_valid_ms;
-      if (age < kOnlineTimeoutMs) {
-        online_mask[b] |= (1u << c);
-        if (age > oldest_age[b]) oldest_age[b] = age;
-      }
+      if (age < kOnlineTimeoutMs && age > oldest_age[b]) oldest_age[b] = age;
     }
   }
 
@@ -108,8 +120,8 @@ void fill_plot(float * plot, uint32_t now_ms)
   plot[1] = (float)buses[1].total_frames;
   plot[2] = (float)buses[0].last_id;
   plot[3] = (float)buses[1].last_id;
-  plot[4] = (float)online_mask[0];
-  plot[5] = (float)online_mask[1];
+  plot[4] = (float)online[0];
+  plot[5] = (float)online[1];
   plot[6] = (float)buses[0].valid_frames;
   plot[7] = (float)buses[1].valid_frames;
   plot[8] = (float)oldest_age[0];
@@ -120,6 +132,22 @@ void fill_plot(float * plot, uint32_t now_ms)
   plot[13] = (float)last_unknown_id;
 }
 }  // namespace
+
+void set_frame_hook(FrameHook hook)
+{
+  frame_hook = hook;
+}
+
+bool can_diag_start()
+{
+  can_diag_init();
+  return state == 1u;
+}
+
+uint32_t online_mask(int bus, uint32_t now_ms)
+{
+  return online_mask_for(bus, now_ms);
+}
 
 void can_diag_on_rx(CAN_HandleTypeDef * hcan)
 {
@@ -149,6 +177,19 @@ void can_diag_on_rx(CAN_HandleTypeDef * hcan)
     const bool standard = (header.IDE == CAN_ID_STD);
     const uint32_t id = standard ? header.StdId : header.ExtId;
     bus.last_id = id;
+
+    if (frame_hook != nullptr) {
+      Frame frame = {
+        bus_index,
+        id,
+        standard,
+        header.RTR == CAN_RTR_REMOTE,
+        (uint8_t)header.DLC,
+        data,
+        now_ms,
+      };
+      frame_hook(frame);
+    }
 
     if (standard) {
       const int candidate = find_candidate(id);
@@ -185,7 +226,7 @@ void can_diag_on_rx(CAN_HandleTypeDef * hcan)
 
 void can_diag_loop(float * plot)
 {
-  can_diag_init();
+  can_diag_start();
 
   while (true) {
     fill_plot(plot, osKernelSysTick());

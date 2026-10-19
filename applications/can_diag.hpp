@@ -5,14 +5,15 @@
 
 #include "can.h"
 
-// 双 CAN 接收诊断模式。
+// 双 CAN 接收诊断路径。
 //
-// 设计边界：
-//   - 只接收反馈，不发送任何 CAN 帧（包括 0x200 / 0x1FF 零控制帧）。
-//   - CAN1、CAN2 都初始化接收；不进入正常云台控制/折叠流程。
+// 本模块只接收，不发送 CAN 帧。
+//   - CAN1、CAN2 都初始化接收；纯诊断模式不进入正常云台控制/折叠流程。
 //   - 不创建 sp::RM_Motor，不调用 cmd()/send()。
+//   - FOLD_TEST_ENABLE=1 时，单电机测试复用本模块的接收路径，并通过
+//     set_frame_hook() 取 0x205 原始帧；发送由测试模块负责。
 //
-// 该模式默认开启；切回正常云台代码时把 CAN_DIAG_ENABLE 改为 0。
+// CAN_DIAG_ENABLE=1 提供双 CAN 接收；纯诊断在 FOLD_TEST_ENABLE=0 时运行。
 #ifndef CAN_DIAG_ENABLE
 #define CAN_DIAG_ENABLE 1
 #endif
@@ -74,6 +75,29 @@ extern BusStats buses[kBusCount];
 // 最近一个未知帧（用于调试；14 通道里显示 ID）。
 extern volatile uint32_t last_unknown_id;
 extern volatile uint32_t last_unknown_bus;
+
+// 每帧原始视图，供单电机测试挂接（不改变诊断统计）。
+struct Frame
+{
+  int bus;  // 0 = CAN1, 1 = CAN2
+  uint32_t id;
+  bool standard;
+  bool remote;
+  uint8_t dlc;
+  uint8_t * data;
+  uint32_t now_ms;
+};
+
+using FrameHook = void (*)(const Frame & frame);
+
+// 在 can_diag_start() 之前设置；用于把 0x205 原始帧交给测试模块。
+void set_frame_hook(FrameHook hook);
+
+// 初始化并启动 CAN1/CAN2 接收；返回两路是否都启动成功。
+bool can_diag_start();
+
+// 候选在线位图（bit0~10）。
+uint32_t online_mask(int bus, uint32_t now_ms);
 
 // 只接收诊断主循环；不返回。plot 为 14 通道 SerialPlot 缓冲。
 void can_diag_loop(float * plot);
