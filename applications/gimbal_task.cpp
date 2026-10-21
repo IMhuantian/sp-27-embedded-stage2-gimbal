@@ -11,7 +11,7 @@
  *   右摇杆左右 → 偏航角速度给定(满推 YAW_RATE_MAX rad/s)
  *   左摇杆上下 → 俯仰角速度给定(增量式位置环：松手停在当前角，因为俯仰轴有重力负载)
  *   左摇杆左右 / 拨轮 → 暂未分配
- *   4.4.8 目标轨迹跟踪 → TRAJ_ENABLE=true 且右拨杆上档时接管偏航/俯仰给定（组委会 trajectory_task）
+ *   4.4.8 目标轨迹跟踪 → TRAJ_ENABLE=true 且右拨杆打到 TRAJ_GEAR（默认上档）时接管偏航/俯仰给定
  *
  * 安全：
  *   1) 三层失能：拨杆下档 / 遥控器失联 / 电机反馈中断 —— 每周期把三个电机都发 0
@@ -73,11 +73,13 @@ constexpr float PITCH_RATE_MAX = 0.8f;  // rad/s：左摇杆上下满推（事�
 // 俯仰机械限位的唯一出处是 gimbal_task.hpp 里的 PITCH_LIMIT_MIN/MAX_RAD（值待建模实测）
 constexpr float PITCH_MIN_RAD = PITCH_LIMIT_MIN_RAD;  // 俯仰机械下限
 constexpr float PITCH_MAX_RAD = PITCH_LIMIT_MAX_RAD;  // 俯仰机械上限
-constexpr float YAW_MAX_TORQUE = 0.3f;    // GM6020 满量程 2.223 N·m；事故后收到 0.3，机构验证过再放开
-constexpr float PITCH_MAX_TORQUE = 0.3f;  // 事故后 1.8 → 0.5 → 0.3：PLA 件扛不住，换件验证后再逐步加
-constexpr float FOLD_MAX_TORQUE = 1.2f;   // 折叠 GM6020 上限（驱动层封顶 2.223 N·m）；事故后 2.2→1.2
-constexpr bool FOLD_TORQUE_PLOT = true;   // 5 号通道显折叠输出转矩 N·m（偏航未启用时调试用）
-constexpr bool YAW_SPEED_PLOT = true;     // 4 号通道改显偏航实际角速度 rad/s（调偏航环时用；不调了改回 false 看 roll）
+constexpr float YAW_MAX_TORQUE = 0.3f;  // GM6020 满量程 2.223 N·m；事故后收到 0.3，机构验证过再放开
+constexpr float PITCH_MAX_TORQUE =
+  0.3f;                                  // 事故后 1.8 → 0.5 → 0.3：PLA 件扛不住，换件验证后再逐步加
+constexpr float FOLD_MAX_TORQUE = 1.2f;  // 折叠 GM6020 上限（驱动层封顶 2.223 N·m）；事故后 2.2→1.2
+constexpr bool FOLD_TORQUE_PLOT = false;  // 5 号通道显折叠输出转矩 N·m（偏航未启用时调试用）
+constexpr bool YAW_SPEED_PLOT =
+  true;  // 4 号通道改显偏航实际角速度 rad/s（调偏航环时用；不调了改回 false 看 roll）
 
 // ---- 安全联锁（2026/10/21 事故后加）----------------------------------------
 // 事故：折叠被重力压下来 → 上段倒下 → IMU 姿态剧变 → 俯仰环还在按轨迹纠偏 →
@@ -101,7 +103,7 @@ constexpr float FOLD_FF_SIGN = 1.0f;
 // 0.8 rad/s = 46 deg/s；80 deg（1.396 rad）的行程约 1.8 s 走完。还是太快就把 FOLD_SPEED_MAX 调小。
 // 右拨杆中档 = 折叠展开（现场要求）：中档时忽略测距，直接把折叠臂摆到展开位；
 // 其它档位仍按测距自动折叠（AUTO），台架可用 FOLD_CMD 强制收/展。
-constexpr bool FOLD_MID_DEPLOY = true;
+constexpr bool FOLD_MID_DEPLOY = false;
 constexpr float FOLD_SPEED_MAX = 0.8f;   // rad/s：折叠目标角变化率上限（事故后 1.2→0.8，约 46 °/s）
 constexpr float FOLD_ACC_MAX = 1.5f;     // rad/s²：折叠目标角加速度上限（事故后 3.0→1.5）
 constexpr float FOLD_SPEED_GAIN = 4.0f;  // 1/s：接近目标时按这个增益减速
@@ -110,9 +112,9 @@ constexpr float FOLD_SPEED_GAIN = 4.0f;  // 1/s：接近目标时按这个增益
 // ---- 使能瞬间的柔和处理（避免切档时猛拉/猛冲）----
 // 失能期间机构会被重力放下来；重新使能时若还按“上电时的设定角”闭环，误差很大 → 第一拍就满转矩。
 // 做法：使能第一拍把设定角/规划点“就地接管”成当前实际角，再加上出力变化率限制。
-constexpr float PITCH_OUT_SLEW = 3.0f;     // N·m/s：俯仰出力变化率上限（3 → 0.3 N·m 约 100 ms）
-constexpr float FOLD_TORQUE_SLEW = 8.0f;   // N·m/s：折叠出力变化率上限（8 → 1.2 N·m 约 150 ms）
-constexpr float YAW_OUT_SLEW = 8.0f;       // N·m/s：偏航出力变化率上限（事故后新加，防阶跃）
+constexpr float PITCH_OUT_SLEW = 3.0f;    // N·m/s：俯仰出力变化率上限（3 → 0.3 N·m 约 100 ms）
+constexpr float FOLD_TORQUE_SLEW = 8.0f;  // N·m/s：折叠出力变化率上限（8 → 1.2 N·m 约 150 ms）
+constexpr float YAW_OUT_SLEW = 8.0f;      // N·m/s：偏航出力变化率上限（事故后新加，防阶跃）
 constexpr float STICK_DEADZONE = 0.02f;
 
 // 方向：现场确认后如反了就把对应 SIGN 取反（与底盘工程 FWD_DIR / SIDE_DIR / ROT_DIR 同一套路）
@@ -134,19 +136,24 @@ constexpr uint32_t STARTUP_WAIT_MS = 1000;  // 等电机上电自检 + 第一帧
 // ⚠ 2026/10/21 事故后默认关掉：等折叠保持/结构修好、手托验证过再改 true
 // 4.4.8 编译期总开关。⚠ 2026/10/21 事故后默认关掉：
 // 等折叠保持与结构修好、并手托验证过再改 true。
-constexpr bool TRAJ_ENABLE = false;  // 编译期总开关；运行时还要把右拨杆打到上档才接管（中档仍是手动）
+constexpr bool TRAJ_ENABLE = true;  // 编译期总开关；运行时还要把右拨杆打到 TRAJ_GEAR 才接管
 // 只看不驱动：先上档看波形上的目标轨迹，确认无误再改成 false 让电机真跟
 constexpr bool TRAJ_DRYRUN = false;
 // 预演：true = 不看遥控器也不看拨杆，上电就循环播放参考曲线（只给波形看；配合 TRAJ_DRYRUN 电机不出力）
 constexpr bool TRAJ_PREVIEW = false;
-constexpr float TRAJ_YAW_KP = 3.0f;          // 1/s        角度误差 → 角速度给定
-constexpr float TRAJ_YAW_VEL_FF = 1.0f;      // 轨迹角速度前馈系数（1.0 = 直接叠加）
-constexpr float TRAJ_YAW_RATE_LIM = 1.0f;    // rad/s      跟踪时角速度上限（事故后 2.0→1.0）
+constexpr float TRAJ_YAW_KP = 3.0f;      // 1/s        角度误差 → 角速度给定
+constexpr float TRAJ_YAW_VEL_FF = 1.0f;  // 轨迹角速度前馈系数（1.0 = 直接叠加）
+constexpr float TRAJ_YAW_RATE_LIM =
+  1.5f;  // rad/s      跟踪时角速度上限（要 >= AMP_SCALE x 轨迹峰值 7.15 = 1.07）
 constexpr float TRAJ_PITCH_LEAD_S = 0.03f;   // s          参考角超前量（事故后 0.06→0.03，别抢跑）
 constexpr float TRAJ_PITCH_ACC_FF = 0.004f;  // N·m/(rad/s²) 加速度转矩前馈（标定项，默认 0）
 constexpr bool TRAJ_ANCHOR_ON_ENTER = true;  // 上档瞬间把轨迹原点对齐到当前姿态（避免参考阶跃）
-constexpr float TRAJ_AMP_SCALE = 0.15f;      // 轨迹幅度缩放：事故后 0.3→0.15（约 ±4.5° 俯仰 / ±3.4° 偏航）
-constexpr float TRAJ_REF_SLEW = 1.0f;        // rad/s 俯仰参考角变化率上限（事故后 2.0→1.0）
+constexpr float TRAJ_AMP_SCALE =
+  0.15f;  // 轨迹幅度缩放：事故后 0.3→0.15（约 ±4.5° 俯仰 / ±3.4° 偏航）
+constexpr float TRAJ_REF_SLEW =
+  1.5f;  // rad/s 俯仰参考角变化率上限（要 >= AMP_SCALE x 轨迹峰值 8.31 = 1.25）
+constexpr sp::DBusSwitchMode TRAJ_GEAR =
+  sp::DBusSwitchMode::UP;  // 轨迹挂在哪个档（UP=上档，MID=中档）
 
 // ---- 电机与总线 ----------------------------------------------------------
 // 两条总线：偏航在 CAN2，折叠与俯仰在 CAN1（队友 2026-10-19 实测接线）
@@ -166,14 +173,15 @@ sp::PID pitch_pid(CONTROL_DT, 3.0f, 5.0f, 0.15f, PITCH_MAX_TORQUE, PITCH_MAX_TOR
 // 位置环：Ki 0.05→5（1 ms 周期下 0.05 要几十秒才攒出力矩）；到位后缓慢爬行/来回找就把 Ki 降回 2
 // 折叠(GM6020 电压模式)：Kp 3 V/rad
 sp::PID fold_pid(
-  CONTROL_DT, 8.0f, 8.0f, 0.20f, FOLD_MAX_TORQUE, FOLD_MAX_TORQUE, 0.7f);  // Kp 硬顶 + Ki 扛重力；max_iout=max_out 防 windup
+  CONTROL_DT, 8.0f, 8.0f, 0.20f, FOLD_MAX_TORQUE, FOLD_MAX_TORQUE,
+  0.7f);  // Kp 硬顶 + Ki 扛重力；max_iout=max_out 防 windup
 
 // ---- 运行状态（都只在本文件内读写，只有 plot_ch 对外）-------------------
 float pitch_target_ = 0.0f;  // 俯仰目标角 rad
 float yaw_sp_ = 0.0f;        // 偏航目标角速度 rad/s
 float yaw_out_ = 0.0f;       // 偏航控制量 V
 float pitch_out_ = 0.0f;     // 俯仰控制量 N·m(转矩模式)
-uint32_t guard_ms_ = 0;  // 姿态联锁：超限持续了多少个控制周期（1 ms/拍）
+uint32_t guard_ms_ = 0;      // 姿态联锁：超限持续了多少个控制周期（1 ms/拍）
 bool fold_active_ = false;
 // 无折叠指令时的"保持角"：上电拿到反馈后锁存一次，之后一直闭环顶住（不发 0 转矩，避免重力下垂）
 float fold_hold_rad_ = 0.0f;
@@ -436,8 +444,10 @@ extern "C" void gimbal_task()
     gimbal_fault_ = gimbal_fault_code(now_ms);  // 1 下档 / 2 遥控失联 / 3 偏航反馈 / 4 俯仰反馈
 
     // ---- 姿态联锁（事故后加）：横滚超限 / 跟随精度崩了且已在出力 → 判机构异常，撒手 ----
-    if (ATTITUDE_GUARD_ENABLE && (fabsf(imu.roll) > GUARD_ROLL_MAX_RAD ||
-        (fabsf(pitch_target_ - pitch_fb_) > GUARD_PITCH_ERR_MAX_RAD && fabsf(pitch_out_) > 0.2f))) {
+    if (
+      ATTITUDE_GUARD_ENABLE &&
+      (fabsf(imu.roll) > GUARD_ROLL_MAX_RAD ||
+       (fabsf(pitch_target_ - pitch_fb_) > GUARD_PITCH_ERR_MAX_RAD && fabsf(pitch_out_) > 0.2f))) {
       if (guard_ms_ < GUARD_TRIP_MS) ++guard_ms_;
     }
     else {
@@ -452,8 +462,7 @@ extern "C" void gimbal_task()
       // 折叠不在展开位（掉了 / 没折回来）时不许进轨迹：否则上段倒下 + 轨迹纠偏会把结构扯坏
       const bool fold_deployed_ok =
         (!TRAJ_REQUIRE_FOLD_DEPLOY) || (fabsf(fold_angle() - FOLD_DEPLOY_RAD) < TRAJ_FOLD_TOL_RAD);
-      const bool traj_mode =
-        TRAJ_ENABLE && (remote.sw_r == sp::DBusSwitchMode::UP) && fold_deployed_ok;
+      const bool traj_mode = TRAJ_ENABLE && (remote.sw_r == TRAJ_GEAR) && fold_deployed_ok;
       traj_active_ = traj_mode;
       if (traj_mode) {
         // ---- 4.4.8：按组委会轨迹曲线跟踪 ----
@@ -550,7 +559,11 @@ extern "C" void gimbal_task()
       if (mid_deploy) {
         fold_target = FOLD_DEPLOY_RAD;
       }
-      if (mid_deploy || fold_target_rad(&fold_target)) {
+      // 轨迹跟踪期间把折叠锁在展开位：跑轨迹时不许被测距触发收折（两者会打架）
+      if (traj_active_) {
+        fold_target = FOLD_DEPLOY_RAD;
+      }
+      if (mid_deploy || traj_active_ || fold_target_rad(&fold_target)) {
         fold_hold_rad_ = fold_target;
         fold_hold_valid_ = true;
         fold_goal = fold_target;
