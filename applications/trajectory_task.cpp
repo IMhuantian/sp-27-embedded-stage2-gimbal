@@ -732,29 +732,7 @@ constexpr TrajectoryPoint scale(const TrajectoryPoint & point)
           point.pitch * kPitchScale, point.pitch_vel * kPitchScale * kTimeScale,
           point.pitch_acc * kPitchScale * kTimeScale * kTimeScale};
 }
-constexpr TrajectoryPoint kInitialPoint = scale(kTrajectory[0]);
-
-void publish(const TrajectoryPoint & point)
-{
-  taskENTER_CRITICAL();
-  yaw = point.yaw;
-  yaw_vel = point.yaw_vel;
-  yaw_acc = point.yaw_acc;
-  pitch = point.pitch;
-  pitch_vel = point.pitch_vel;
-  pitch_acc = point.pitch_acc;
-  taskEXIT_CRITICAL();
-}
 }  // namespace
-
-extern "C" {
-volatile float yaw = kInitialPoint.yaw;
-volatile float yaw_vel = kInitialPoint.yaw_vel;
-volatile float yaw_acc = kInitialPoint.yaw_acc;
-volatile float pitch = kInitialPoint.pitch;
-volatile float pitch_vel = kInitialPoint.pitch_vel;
-volatile float pitch_acc = kInitialPoint.pitch_acc;
-}
 
 extern "C" TrajectoryPoint trajectory_sample_at_ms(uint32_t elapsed_ms)
 {
@@ -773,27 +751,3 @@ extern "C" TrajectoryPoint trajectory_sample_at_ms(uint32_t elapsed_ms)
                 a.pitch_acc + alpha * (b.pitch_acc - a.pitch_acc)});
 }
 
-extern "C" TrajectoryPoint trajectory_read(void)
-{
-  taskENTER_CRITICAL();
-  const TrajectoryPoint point = {yaw, yaw_vel, yaw_acc, pitch, pitch_vel, pitch_acc};
-  taskEXIT_CRITICAL();
-  return point;
-}
-
-extern "C" void trajectory_task(void const * argument)
-{
-  (void)argument;
-  TickType_t previous_tick = xTaskGetTickCount();
-  uint32_t phase_ms = 0U;
-  publish(trajectory_sample_at_ms(0U));
-  for (;;) {
-    const TickType_t now = xTaskGetTickCount();
-    const TickType_t delta_ticks = now - previous_tick;
-    previous_tick = now;
-    phase_ms = (phase_ms + delta_ticks % TRAJECTORY_PERIOD_MS) % TRAJECTORY_PERIOD_MS;
-    publish(trajectory_sample_at_ms(phase_ms));
-    TickType_t wake_tick = now;
-    vTaskDelayUntil(&wake_tick, pdMS_TO_TICKS(TRAJECTORY_UPDATE_INTERVAL_MS));
-  }
-}

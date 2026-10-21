@@ -18,13 +18,6 @@
 extern "C" {
 #endif
 
-extern volatile float yaw;
-extern volatile float yaw_vel;
-extern volatile float yaw_acc;
-extern volatile float pitch;
-extern volatile float pitch_vel;
-extern volatile float pitch_acc;
-
 typedef struct
 {
   float yaw;
@@ -34,10 +27,6 @@ typedef struct
   float pitch_vel;
   float pitch_acc;
 } TrajectoryPoint;
-
-void trajectory_task(void const * argument);
-
-TrajectoryPoint trajectory_read(void);
 
 TrajectoryPoint trajectory_sample_at_ms(uint32_t elapsed_ms);
 

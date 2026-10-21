@@ -28,35 +28,13 @@ uint32_t cond_since_ = 0;
 
 // 动作超时（4.4.7 的"异常退出保护"）
 uint32_t move_start_ = 0;
+uint32_t folded_since_ = 0;  // 进入 FOLDED 的时刻（展开前的保持计时）
 }  // namespace
-
-FoldState fold_state()
-{
-  return state_;
-}
 
 bool fold_target_rad(float * target_rad)
 {
   if (target_rad != nullptr) *target_rad = has_target_ ? target_rad_ : 0.0f;
   return has_target_;
-}
-
-const char * fold_state_name(FoldState s)
-{
-  switch (s) {
-    case FoldState::IDLE:
-      return "IDLE";
-    case FoldState::FOLDING:
-      return "FOLDING";
-    case FoldState::FOLDED:
-      return "FOLDED";
-    case FoldState::UNFOLDING:
-      return "UNFOLDING";
-    case FoldState::FAULT:
-      return "FAULT";
-    default:
-      return "?";
-  }
 }
 
 void fold_update(uint32_t now_ms)
@@ -70,29 +48,36 @@ void fold_update(uint32_t now_ms)
     return;
   }
 
+  // ---- 0) 台架强制：不看测距，直接把目标角给定（测折叠电机/机构用）----
+  if (FOLD_CMD != FoldCmd::AUTO) {
+    const bool want_fold = (FOLD_CMD == FoldCmd::FOLD);
+    state_ = want_fold ? FoldState::FOLDED : FoldState::IDLE;
+    has_target_ = true;
+    target_rad_ = want_fold ? FOLD_STOW_RAD : FOLD_DEPLOY_RAD;
+    cond_last_ = false;
+    return;
+  }
+
   // ---- 1) 取测距（带新鲜度：超过 TOF_TIMEOUT_MS 没更新视为无效）----
   float dist_cm = -1.0f;
   const bool dist_ok = tof_get_distance(&dist_cm, now_ms);
 
   // ---- 2) 条件 + 回差 + 去抖（避免阈值附近频繁切换）----
-  //     收折条件：距离有效且 < 触发阈值；展开条件：距离有效且 > 释放阈值；
-  //     距离无效（超时/帧错）时保持当前状态不动，不因为"看不见"就乱动机构。
-  bool cond = false;
-  if (dist_ok) {
-    if (state_ == FoldState::FOLDED && !has_target_) cond = false;
-    if (state_ == FoldState::FOLDED) {
-      cond = (dist_cm > FOLD_RELEASE_CM);       // 已收折 → 只看释放阈值
-    } else {
-      cond = (dist_cm < FOLD_TRIGGER_CM);       // 其余状态 → 只看触发阈值
-    }
-  }
+  //     收折：距离有效且 < 触发阈值；
+  //     展开：距离 > 释放阈值，或“前方已经没有东西”（超量程/无效读数）；
+  //     通信异常（无帧/超时/帧错）时保持当前状态，不因为"看不见"就乱动机构。
+  const bool far = dist_ok ? (dist_cm > FOLD_RELEASE_CM) : (tof_status == TOF_STATUS_RANGE);
+  const bool cond = (state_ == FoldState::FOLDED || state_ == FoldState::UNFOLDING)
+                      ? far
+                      : (dist_ok && dist_cm < FOLD_TRIGGER_CM);
   if (cond != cond_last_) {
     cond_last_ = cond;
     cond_since_ = now_ms;
   }
   const bool cond_stable = cond && (now_ms - cond_since_ >= FOLD_DEBOUNCE_MS);
+  const uint32_t move_elapsed = now_ms - move_start_;
 
-  // ---- 3) 状态机 ----
+  // ---- 3) 状态机（动作按“时间到”判定完成，不依赖距离怎么变）----
   switch (state_) {
     case FoldState::IDLE:
       if (cond_stable) {
@@ -104,24 +89,22 @@ void fold_update(uint32_t now_ms)
       break;
 
     case FoldState::FOLDING:
-      // TODO(接线后)：到位判据 —— 位置误差 < 阈值 或 限位开关闭合；这里先按固定位置判断
-      if (cond && (now_ms - move_start_ < FOLD_MOVE_TIMEOUT_MS)) {
-        has_target_ = true;
-        target_rad_ = FOLD_STOW_RAD;
-      } else if (cond) {
-        // 超时 → 异常退出保护：停机，等人工复位
-        state_ = FoldState::FAULT;
-        has_target_ = false;
-        target_rad_ = 0.0f;
-      } else {
+      // 目标角持续给 FOLD_STOW_RAD；走完 FOLD_MOVE_TIME_MS 才算到位（机构位置判据待实测补）
+      has_target_ = true;
+      target_rad_ = FOLD_STOW_RAD;
+      if (move_elapsed >= FOLD_MOVE_TIME_MS) {
         state_ = FoldState::FOLDED;
+        folded_since_ = now_ms;
+      } else if (move_elapsed > FOLD_MOVE_TIMEOUT_MS) {
+        state_ = FoldState::FAULT;  // 超时 → 异常退出保护，停机等人工复位
         has_target_ = false;
         target_rad_ = 0.0f;
       }
       break;
 
     case FoldState::FOLDED:
-      if (cond_stable) {
+      // 收折后至少保持 FOLD_MIN_HOLD_MS（≈隧道长度 / 车速），再允许展开
+      if (cond_stable && (now_ms - folded_since_ >= FOLD_MIN_HOLD_MS)) {
         state_ = FoldState::UNFOLDING;
         has_target_ = true;
         target_rad_ = FOLD_DEPLOY_RAD;
@@ -130,15 +113,14 @@ void fold_update(uint32_t now_ms)
       break;
 
     case FoldState::UNFOLDING:
-      if (cond && (now_ms - move_start_ < FOLD_MOVE_TIMEOUT_MS)) {
-        has_target_ = true;
-        target_rad_ = FOLD_DEPLOY_RAD;
-      } else if (cond) {
-        state_ = FoldState::FAULT;
+      has_target_ = true;
+      target_rad_ = FOLD_DEPLOY_RAD;
+      if (move_elapsed >= FOLD_MOVE_TIME_MS) {
+        state_ = FoldState::IDLE;
         has_target_ = false;
         target_rad_ = 0.0f;
-      } else {
-        state_ = FoldState::IDLE;
+      } else if (move_elapsed > FOLD_MOVE_TIMEOUT_MS) {
+        state_ = FoldState::FAULT;
         has_target_ = false;
         target_rad_ = 0.0f;
       }
