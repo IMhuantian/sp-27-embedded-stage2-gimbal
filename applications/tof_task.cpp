@@ -83,6 +83,15 @@ volatile uint32_t tof_timeouts = 0;
 volatile uint32_t tof_errors = 0;
 
 // 3 点中值(窗口没填满就取现有的): 让折叠逻辑拿到稳定的距离, 而不是单帧跳变
+// 距离数据的“年龄”(ms)：时间戳在串口中断里写，任务里比较。
+// 必须用带符号差值：中断可能在任务读走 now_ms 之后才写时间戳，
+// 无符号相减会算成 42 亿 → 偶发误判“超时”，把中值清掉、距离变 -1（折叠判据会打嗝）。
+static uint32_t tof_age_ms(uint32_t now_ms)
+{
+  const int32_t dt = (int32_t)(now_ms - tof_last_ms);
+  return (dt < 0) ? 0u : (uint32_t)dt;
+}
+
 static float tof_median()
 {
   if (tof_med_n == 0) return -1.0f;
@@ -205,7 +214,7 @@ static void tof_update(uint32_t now_ms)
   }
 
   // 2) 通信异常: 超过 TOF_TIMEOUT_MS 没有新有效帧 → 判无效 + 计数(规则书 L364 的"通信异常处理")
-  if (tof_valid && (uint32_t)(now_ms - tof_last_ms) > TOF_TIMEOUT_MS) {
+  if (tof_valid && tof_age_ms(now_ms) > TOF_TIMEOUT_MS) {
     tof_valid = false;
     tof_distance_cm = -1.0f;
     tof_raw_cm = -1.0f;
@@ -217,6 +226,9 @@ static void tof_update(uint32_t now_ms)
 
   // 3) 一直收不到有效帧 → 重发配置命令(模块上电比我们晚 / 被别的命令改过模式 / 线没接好)
   if (!tof_valid && (uint32_t)(now_ms - tof_cfg_ms) > TOF_CFG_RETRY_MS) {
+    // 顺便补一次 DMA 重挂：万一半满/错误回调里那次重挂失败(返回 HAL_BUSY)，测距会永久停住。
+    // 已经在收的时候这调用返回 HAL_BUSY，不会打断正常接收。
+    HAL_UARTEx_ReceiveToIdle_DMA(&huart6, tof_buf, TOF_BUF_SIZE);
     tof_send_cfg();
   }
 }
@@ -226,7 +238,7 @@ bool tof_get_distance(float* cm, uint32_t now_ms)
 {
   if (!TOF_ENABLE || !tof_valid) return false;
   if (tof_distance_cm < 0.0f) return false;
-  if ((uint32_t)(now_ms - tof_last_ms) > TOF_TIMEOUT_MS) return false;
+  if (tof_age_ms(now_ms) > TOF_TIMEOUT_MS) return false;
   if (cm != nullptr) *cm = tof_distance_cm;
   return true;
 }

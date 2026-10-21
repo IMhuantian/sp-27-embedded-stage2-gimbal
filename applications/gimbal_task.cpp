@@ -68,15 +68,27 @@ namespace
 constexpr float CONTROL_DT = 1e-3f;  // 控制周期 1 ms
 
 // ---- 给定与限幅 ----------------------------------------------------------
-constexpr float YAW_RATE_MAX = 6.0f;    // rad/s：右摇杆左右满推
-constexpr float PITCH_RATE_MAX = 1.5f;  // rad/s：左摇杆上下满推
+constexpr float YAW_RATE_MAX = 1.5f;    // rad/s：右摇杆左右满推（事故后 6.0→1.5，约 86 °/s）
+constexpr float PITCH_RATE_MAX = 0.8f;  // rad/s：左摇杆上下满推（事故后 1.5→0.8，约 46 °/s）
 // 俯仰机械限位的唯一出处是 gimbal_task.hpp 里的 PITCH_LIMIT_MIN/MAX_RAD（值待建模实测）
 constexpr float PITCH_MIN_RAD = PITCH_LIMIT_MIN_RAD;  // 俯仰机械下限
 constexpr float PITCH_MAX_RAD = PITCH_LIMIT_MAX_RAD;  // 俯仰机械上限
-constexpr float YAW_MAX_TORQUE = 0.5f;    // GM6020 电流模式满量程 2.223 N·m；先给 0.5，整定时再放开
-constexpr float PITCH_MAX_TORQUE = 1.0f;  // RM2006 额定转矩约 1 N·m（俯仰是转矩模式）
-constexpr float FOLD_MAX_TORQUE = 2.2f;   // 折叠 GM6020 电流模式上限（驱动层封顶 2.223 N·m）
-constexpr bool FOLD_TORQUE_PLOT = true;  // 5 号通道显折叠输出转矩 N·m（偏航未启用时调试用）
+constexpr float YAW_MAX_TORQUE = 0.3f;    // GM6020 满量程 2.223 N·m；事故后收到 0.3，机构验证过再放开
+constexpr float PITCH_MAX_TORQUE = 0.3f;  // 事故后 1.8 → 0.5 → 0.3：PLA 件扛不住，换件验证后再逐步加
+constexpr float FOLD_MAX_TORQUE = 1.2f;   // 折叠 GM6020 上限（驱动层封顶 2.223 N·m）；事故后 2.2→1.2
+constexpr bool FOLD_TORQUE_PLOT = true;   // 5 号通道显折叠输出转矩 N·m（偏航未启用时调试用）
+constexpr bool YAW_SPEED_PLOT = true;     // 4 号通道改显偏航实际角速度 rad/s（调偏航环时用；不调了改回 false 看 roll）
+
+// ---- 安全联锁（2026/10/21 事故后加）----------------------------------------
+// 事故：折叠被重力压下来 → 上段倒下 → IMU 姿态剧变 → 俯仰环还在按轨迹纠偏 →
+//       3D 打印件承受异常扭矩被扯断。原则：机构姿态一旦异常就"撒手"(0 转矩)，
+//       绝不用大转矩去救；并且折叠不在展开位时根本不许进轨迹跟踪。
+constexpr bool ATTITUDE_GUARD_ENABLE = true;          // 姿态异常 → 立即失能（原因码 5）
+constexpr float GUARD_ROLL_MAX_RAD = 0.261799f;       // 15°：横滚超限说明上段倒了/机构翻了
+constexpr float GUARD_PITCH_ERR_MAX_RAD = 0.349066f;  // 20°：跟随差这么多且已在出力 → 被判卡住
+constexpr uint32_t GUARD_TRIP_MS = 50u;               // 连续超限 50 ms 才触发（滤掉瞬时冲击）
+constexpr bool TRAJ_REQUIRE_FOLD_DEPLOY = true;       // 折叠不在展开位(±5°)就不许进轨迹
+constexpr float TRAJ_FOLD_TOL_RAD = 0.0872665f;
 // 抗重力前馈：俯仰臂+头绕折叠轴的重力矩（按建模估算：展开姿态约 0.2 N·m，
 // 转到"臂水平"时最大约 1.0 N·m）。**默认关（0）**：常值前馈的方向必须先验证，
 // 符号反了会变成"压着往下"，比不开更糟（台上 FF=1.5 仍下沉就是符号问题）。
@@ -86,12 +98,21 @@ constexpr bool FOLD_TORQUE_PLOT = true;  // 5 号通道显折叠输出转矩 N·
 constexpr float FOLD_GRAVITY_FF_NM = 0.0f;
 constexpr float FOLD_FF_SIGN = 1.0f;
 // 折叠速度规划：不给目标角阶跃，而是让目标角按限速/限加速度爬过去
-// 0.5 rad/s = 29 deg/s；1.2 rad 的行程约 2.4 s 走完。还是太快就把 FOLD_SPEED_MAX 调小。
-constexpr float FOLD_SPEED_MAX = 1.2f;   // rad/s：折叠目标角变化率上限（按 0.6 m/s 车速算的时序）
-constexpr float FOLD_ACC_MAX = 3.0f;     // rad/s^2：折叠目标角加速度上限（起停更柔和）
+// 0.8 rad/s = 46 deg/s；80 deg（1.396 rad）的行程约 1.8 s 走完。还是太快就把 FOLD_SPEED_MAX 调小。
+// 右拨杆中档 = 折叠展开（现场要求）：中档时忽略测距，直接把折叠臂摆到展开位；
+// 其它档位仍按测距自动折叠（AUTO），台架可用 FOLD_CMD 强制收/展。
+constexpr bool FOLD_MID_DEPLOY = true;
+constexpr float FOLD_SPEED_MAX = 0.8f;   // rad/s：折叠目标角变化率上限（事故后 1.2→0.8，约 46 °/s）
+constexpr float FOLD_ACC_MAX = 1.5f;     // rad/s²：折叠目标角加速度上限（事故后 3.0→1.5）
 constexpr float FOLD_SPEED_GAIN = 4.0f;  // 1/s：接近目标时按这个增益减速
 // 折叠轴软限位：以上电锁存角为中心，顺/逆时针各 60°（机械限位由这一层兜住）
-constexpr float FOLD_SOFT_LIMIT_RAD = 1.047198f;
+// 折叠软限位窗口由 fold_task.hpp 的 FOLD_LIMIT_LO_RAD / FOLD_LIMIT_HI_RAD 给出（相对上电零位）
+// ---- 使能瞬间的柔和处理（避免切档时猛拉/猛冲）----
+// 失能期间机构会被重力放下来；重新使能时若还按“上电时的设定角”闭环，误差很大 → 第一拍就满转矩。
+// 做法：使能第一拍把设定角/规划点“就地接管”成当前实际角，再加上出力变化率限制。
+constexpr float PITCH_OUT_SLEW = 3.0f;     // N·m/s：俯仰出力变化率上限（3 → 0.3 N·m 约 100 ms）
+constexpr float FOLD_TORQUE_SLEW = 8.0f;   // N·m/s：折叠出力变化率上限（8 → 1.2 N·m 约 150 ms）
+constexpr float YAW_OUT_SLEW = 8.0f;       // N·m/s：偏航出力变化率上限（事故后新加，防阶跃）
 constexpr float STICK_DEADZONE = 0.02f;
 
 // 方向：现场确认后如反了就把对应 SIGN 取反（与底盘工程 FWD_DIR / SIDE_DIR / ROT_DIR 同一套路）
@@ -110,17 +131,22 @@ constexpr uint32_t STARTUP_WAIT_MS = 1000;  // 等电机上电自检 + 第一帧
 //   yaw  : 角度外环 P → 角速度给定 = Kp*(θ_ref − θ_imu) + k_v*ω_ref → 原有速率环
 //   pitch: 参考角超前 lead 秒（等效 ω/a 前馈）→ 位置环；再叠一个加速度转矩前馈
 // 两个前馈增益都从安全值起步，不接线时对输出没有任何影响。
-constexpr bool TRAJ_ENABLE =
-  false;  // 编译期总开关；运行时还要把右拨杆打到上档才接管（中档仍是手动）
+// ⚠ 2026/10/21 事故后默认关掉：等折叠保持/结构修好、手托验证过再改 true
+// 4.4.8 编译期总开关。⚠ 2026/10/21 事故后默认关掉：
+// 等折叠保持与结构修好、并手托验证过再改 true。
+constexpr bool TRAJ_ENABLE = false;  // 编译期总开关；运行时还要把右拨杆打到上档才接管（中档仍是手动）
 // 只看不驱动：先上档看波形上的目标轨迹，确认无误再改成 false 让电机真跟
-constexpr bool TRAJ_DRYRUN = true;
+constexpr bool TRAJ_DRYRUN = false;
 // 预演：true = 不看遥控器也不看拨杆，上电就循环播放参考曲线（只给波形看；配合 TRAJ_DRYRUN 电机不出力）
-constexpr bool TRAJ_PREVIEW = true;
-constexpr float TRAJ_YAW_KP = 6.0f;         // 1/s        角度误差 → 角速度给定
-constexpr float TRAJ_YAW_VEL_FF = 1.0f;     // 轨迹角速度前馈系数（1.0 = 直接叠加）
-constexpr float TRAJ_YAW_RATE_LIM = 10.0f;  // rad/s      跟踪时角速度上限（轨迹峰值 7.15）
-constexpr float TRAJ_PITCH_LEAD_S = 0.03f;  // s          参考角超前量（等效速度前馈）
-constexpr float TRAJ_PITCH_ACC_FF = 0.0f;   // N·m/(rad/s²) 加速度转矩前馈（标定项，默认 0）
+constexpr bool TRAJ_PREVIEW = false;
+constexpr float TRAJ_YAW_KP = 3.0f;          // 1/s        角度误差 → 角速度给定
+constexpr float TRAJ_YAW_VEL_FF = 1.0f;      // 轨迹角速度前馈系数（1.0 = 直接叠加）
+constexpr float TRAJ_YAW_RATE_LIM = 1.0f;    // rad/s      跟踪时角速度上限（事故后 2.0→1.0）
+constexpr float TRAJ_PITCH_LEAD_S = 0.03f;   // s          参考角超前量（事故后 0.06→0.03，别抢跑）
+constexpr float TRAJ_PITCH_ACC_FF = 0.004f;  // N·m/(rad/s²) 加速度转矩前馈（标定项，默认 0）
+constexpr bool TRAJ_ANCHOR_ON_ENTER = true;  // 上档瞬间把轨迹原点对齐到当前姿态（避免参考阶跃）
+constexpr float TRAJ_AMP_SCALE = 0.15f;      // 轨迹幅度缩放：事故后 0.3→0.15（约 ±4.5° 俯仰 / ±3.4° 偏航）
+constexpr float TRAJ_REF_SLEW = 1.0f;        // rad/s 俯仰参考角变化率上限（事故后 2.0→1.0）
 
 // ---- 电机与总线 ----------------------------------------------------------
 // 两条总线：偏航在 CAN2，折叠与俯仰在 CAN1（队友 2026-10-19 实测接线）
@@ -133,18 +159,21 @@ sp::RM_Motor fold_motor(
   FOLD_MOTOR_ID, sp::RM_Motors::GM6020, 1.0f);  // 电流模式：0x1FE，cmd 单位 N·m
 
 // ---- 控制器（输出都是"电压 V" / "转矩 N·m"，由 RM_Motor::cmd() 换算成原始值）----
-sp::PID yaw_pid(CONTROL_DT, 0.6f, 0.02f, 0.0f, YAW_MAX_TORQUE, 6.0f, 0.7f);
+sp::PID yaw_pid(CONTROL_DT, 0.6f, 0.2f, 0.0f, YAW_MAX_TORQUE, YAW_MAX_TORQUE, 0.7f);
+// 速度环：Ki 0.02→0.2（1 ms 周期下 0.02 等于没有积分）；max_iout 收到 = max_out，否则积分会 windup
 // 俯仰(M2006 转矩模式)：Kp 1.5 N·m/rad，Ki 用来扛重力
-sp::PID pitch_pid(CONTROL_DT, 1.5f, 0.05f, 0.5f, PITCH_MAX_TORQUE, 3.0f, 0.7f);
+sp::PID pitch_pid(CONTROL_DT, 3.0f, 5.0f, 0.15f, PITCH_MAX_TORQUE, PITCH_MAX_TORQUE, 0.7f);
+// 位置环：Ki 0.05→5（1 ms 周期下 0.05 要几十秒才攒出力矩）；到位后缓慢爬行/来回找就把 Ki 降回 2
 // 折叠(GM6020 电压模式)：Kp 3 V/rad
 sp::PID fold_pid(
-  CONTROL_DT, 3.0f, 2.0f, 0.10f, FOLD_MAX_TORQUE, 2.2f, 0.7f);  // Ki 积分扛重力（前馈默认关）
+  CONTROL_DT, 8.0f, 8.0f, 0.20f, FOLD_MAX_TORQUE, FOLD_MAX_TORQUE, 0.7f);  // Kp 硬顶 + Ki 扛重力；max_iout=max_out 防 windup
 
 // ---- 运行状态（都只在本文件内读写，只有 plot_ch 对外）-------------------
 float pitch_target_ = 0.0f;  // 俯仰目标角 rad
 float yaw_sp_ = 0.0f;        // 偏航目标角速度 rad/s
 float yaw_out_ = 0.0f;       // 偏航控制量 V
 float pitch_out_ = 0.0f;     // 俯仰控制量 N·m(转矩模式)
+uint32_t guard_ms_ = 0;  // 姿态联锁：超限持续了多少个控制周期（1 ms/拍）
 bool fold_active_ = false;
 // 无折叠指令时的"保持角"：上电拿到反馈后锁存一次，之后一直闭环顶住（不发 0 转矩，避免重力下垂）
 float fold_hold_rad_ = 0.0f;
@@ -154,12 +183,22 @@ bool fold_center_valid_ = false;
 float fold_sp_rad_ = 0.0f;  // 速度规划后的折叠目标角（rad）
 float fold_sp_vel_ = 0.0f;  // 速度规划中的目标角速度（rad/s）
 
+// 使能瞬间的对齐标志：失能时置位，重新使能的第一拍把设定/规划点对到当前实际角
+bool pitch_takeover_ = true;
+bool fold_resync_ = true;
+
 // 4.4.8 轨迹状态：从 disable_all 之后重新开始，相位起点记 traj_start_ms_
 uint32_t traj_start_ms_ = 0;
 bool traj_started_ = false;
 bool traj_active_ = false;  // 本周期是否真在轨迹模式（TRAJ_ENABLE && 右拨杆上档），波形据此换参考量
 float traj_ref_yaw_ = 0.0f;  // 本周期轨迹给定角 rad（只给波形看）
 float traj_ref_pitch_ = 0.0f;
+// 上档瞬间的基准：把轨迹映射成"从当前姿态出发、幅度缩放后的相对运动"
+bool traj_anchor_valid_ = false;
+float traj_anchor_yaw_ = 0.0f;    // 上档时的 imu.yaw
+float traj_anchor_pitch_ = 0.0f;  // 上档时的 pitch_fb_
+float traj_tp0_yaw_ = 0.0f;       // 轨迹起点角
+float traj_tp0_pitch_ = 0.0f;
 
 // 俯仰反馈（"仰为正"约定）
 float pitch_fb_ = 0.0f;
@@ -179,10 +218,7 @@ float fold_angle()
   return fold_zero_valid_ ? (fold_motor.angle - fold_zero_rad_) : fold_motor.angle;
 }
 
-float yaw_angle()
-{
-  return yaw_zero_valid_ ? (yaw_motor.angle - yaw_zero_rad_) : yaw_motor.angle;
-}
+float yaw_angle() { return yaw_zero_valid_ ? (yaw_motor.angle - yaw_zero_rad_) : yaw_motor.angle; }
 
 // 摇杆死区 + 线性重映射(过零连续，满量程仍是 ±1)
 float stick(float v, float dz)
@@ -246,6 +282,14 @@ void send_frames()
   }
 }
 
+// 输出限速：每个周期最多变化 step（用来消掉使能/切档瞬间的转矩阶跃）
+float slew_toward(float cur, float goal, float step)
+{
+  if (goal > cur + step) return cur + step;
+  if (goal < cur - step) return cur - step;
+  return goal;
+}
+
 // 失能：清积分 + 三个电机都发 0，并且立刻把 0 发上总线(不能只改内部指令值)
 void disable_all()
 {
@@ -258,6 +302,8 @@ void disable_all()
   yaw_sp_ = 0.0f;
   yaw_out_ = 0.0f;
   pitch_out_ = 0.0f;
+  pitch_takeover_ = true;  // 下次使能就地接管，不猛拉回上电时的设定角
+  fold_resync_ = true;     // 下次使能把折叠规划点对到实际角
   fold_active_ = false;
   fold_hold_valid_ = false;    // 下档失能时不允许顶住（安全要求），下次使能重新锁存当前位置
   fold_center_valid_ = false;  // 软限位中心也重新锁存
@@ -295,12 +341,12 @@ void fill_plot()
   plot_ch[1] = (float)tof_status;  // 0 正常 / 1 无帧 / 2 超时 / 3 帧错 / 4 无效值或超量程
   plot_ch[2] = imu.yaw;
   plot_ch[3] = imu.pitch;
-  plot_ch[4] = imu.roll;
+  plot_ch[4] = YAW_SPEED_PLOT ? yaw_motor.speed : imu.roll;  // 调偏航环时看实际角速度
   // 5 号通道：默认偏航角速度指令；FOLD_TORQUE_PLOT=true 时改显折叠输出转矩 N·m
   // （调试折叠下沉用：稳定之后这个数就是该姿态需要的保持力矩）
   plot_ch[5] = FOLD_TORQUE_PLOT ? fold_out_ : (traj_active_ ? traj_ref_yaw_ : yaw_sp_);
   plot_ch[6] = fold_sp_rad_;                                    // 折叠目标角（已限速规划）rad
-  plot_ch[7] = fold_angle();  // 折叠实际角（相对上电零位）rad
+  plot_ch[7] = fold_angle();                                    // 折叠实际角（相对上电零位）rad
   plot_ch[8] = traj_active_ ? traj_ref_pitch_ : pitch_target_;  // 上档轨迹模式时是轨迹俯仰角 rad
   plot_ch[9] = pitch_fb_;                                       // 仰为正，与 8 号目标同约定
   plot_ch[10] = pitch_out_;
@@ -388,22 +434,51 @@ extern "C" void gimbal_task()
 
     // ---- 三层失能（与底盘工程同一套优先级：下档 > 失联 > 反馈中断）----
     gimbal_fault_ = gimbal_fault_code(now_ms);  // 1 下档 / 2 遥控失联 / 3 偏航反馈 / 4 俯仰反馈
+
+    // ---- 姿态联锁（事故后加）：横滚超限 / 跟随精度崩了且已在出力 → 判机构异常，撒手 ----
+    if (ATTITUDE_GUARD_ENABLE && (fabsf(imu.roll) > GUARD_ROLL_MAX_RAD ||
+        (fabsf(pitch_target_ - pitch_fb_) > GUARD_PITCH_ERR_MAX_RAD && fabsf(pitch_out_) > 0.2f))) {
+      if (guard_ms_ < GUARD_TRIP_MS) ++guard_ms_;
+    }
+    else {
+      guard_ms_ = 0;
+    }
+    if (gimbal_fault_ == 0 && guard_ms_ >= GUARD_TRIP_MS) gimbal_fault_ = 5;  // 5 = 姿态/跟随异常
     if (gimbal_fault_ != 0) {
       disable_all();  // 三层失能：任一原因都整机断力
     }
     else {
       // 4.4.8 触发：编译期开关打开 + 右拨杆上档（中档/上档才使能，下档在上面已失能）
-      const bool traj_mode = TRAJ_ENABLE && (remote.sw_r == sp::DBusSwitchMode::UP);
+      // 折叠不在展开位（掉了 / 没折回来）时不许进轨迹：否则上段倒下 + 轨迹纠偏会把结构扯坏
+      const bool fold_deployed_ok =
+        (!TRAJ_REQUIRE_FOLD_DEPLOY) || (fabsf(fold_angle() - FOLD_DEPLOY_RAD) < TRAJ_FOLD_TOL_RAD);
+      const bool traj_mode =
+        TRAJ_ENABLE && (remote.sw_r == sp::DBusSwitchMode::UP) && fold_deployed_ok;
       traj_active_ = traj_mode;
       if (traj_mode) {
-        // ---- 4.4.8：按组委会轨迹曲线跟踪（上档进入即从轨迹起点开始）----
+        // ---- 4.4.8：按组委会轨迹曲线跟踪 ----
+        // 上档瞬间不直接跳到轨迹起点（起点是 yaw +18° / pitch -30°，一进去就是 0.5 rad 阶跃，
+        // 位置环会立刻满转矩砸过去）。做法：把轨迹当作"相对当前姿态的偏移"，
+        // 参考角 = 上档时的姿态 + TRAJ_AMP_SCALE · (轨迹角 - 轨迹起点角)，天然连续。
         if (!traj_started_) {
           traj_start_ms_ = now_ms;
           traj_started_ = true;
+          const TrajectoryPoint tp0 = trajectory_sample_at_ms(0);
+          traj_anchor_yaw_ = imu.yaw;
+          traj_anchor_pitch_ = sp::limit_min_max(pitch_fb_, PITCH_MIN_RAD, PITCH_MAX_RAD);
+          traj_tp0_yaw_ = tp0.yaw;
+          traj_tp0_pitch_ = tp0.pitch;
+          traj_anchor_valid_ = true;
         }
         const TrajectoryPoint tp = trajectory_sample_at_ms(now_ms - traj_start_ms_);
-        traj_ref_yaw_ = tp.yaw;
-        traj_ref_pitch_ = tp.pitch;
+        float yaw_ref = tp.yaw;
+        float pitch_ref = tp.pitch;
+        if (TRAJ_ANCHOR_ON_ENTER && traj_anchor_valid_) {
+          yaw_ref = traj_anchor_yaw_ + TRAJ_AMP_SCALE * (tp.yaw - traj_tp0_yaw_);
+          pitch_ref = traj_anchor_pitch_ + TRAJ_AMP_SCALE * (tp.pitch - traj_tp0_pitch_);
+        }
+        traj_ref_yaw_ = yaw_ref;
+        traj_ref_pitch_ = pitch_ref;
 
         if (TRAJ_DRYRUN) {
           // 只看参考曲线：两个轴都不出力，波形 5/8 号仍然是轨迹角，9 号是实际角
@@ -417,20 +492,24 @@ extern "C" void gimbal_task()
         else {
           // 偏航：角度外环 P + 轨迹角速度前馈 → 角速度给定 → 原有速率环（复用同一套限幅）
           yaw_sp_ = sp::limit_min_max(
-            TRAJ_YAW_KP * (tp.yaw - imu.yaw) + TRAJ_YAW_VEL_FF * tp.yaw_vel, -TRAJ_YAW_RATE_LIM,
-            TRAJ_YAW_RATE_LIM);
+            TRAJ_YAW_KP * (yaw_ref - imu.yaw) + TRAJ_YAW_VEL_FF * TRAJ_AMP_SCALE * tp.yaw_vel,
+            -TRAJ_YAW_RATE_LIM, TRAJ_YAW_RATE_LIM);
           apply_yaw_soft_limit();
           yaw_pid.calc(yaw_sp_, yaw_motor.speed);
-          yaw_out_ = YAW_OUT_SIGN * yaw_pid.out;
+          yaw_out_ = slew_toward(yaw_out_, YAW_OUT_SIGN * yaw_pid.out, YAW_OUT_SLEW * CONTROL_DT);
           yaw_motor.cmd(yaw_out_);
 
-          // 俯仰：轨迹角 + 超前 lead → 限位截断 → 位置环；再叠加速度电压前馈
-          pitch_target_ = sp::limit_min_max(
-            tp.pitch + TRAJ_PITCH_LEAD_S * tp.pitch_vel, PITCH_MIN_RAD, PITCH_MAX_RAD);
+          // 俯仰：参考角 + 超前 lead → 限位截断 → 变化率限制 → 位置环；再叠加速度转矩前馈
+          const float pitch_target_goal = sp::limit_min_max(
+            pitch_ref + TRAJ_PITCH_LEAD_S * TRAJ_AMP_SCALE * tp.pitch_vel, PITCH_MIN_RAD,
+            PITCH_MAX_RAD);
+          pitch_target_ = slew_toward(pitch_target_, pitch_target_goal, TRAJ_REF_SLEW * CONTROL_DT);
           pitch_pid.calc(pitch_target_, pitch_fb_);
-          pitch_out_ = PITCH_OUT_SIGN * sp::limit_min_max(
-                                          pitch_pid.out + TRAJ_PITCH_ACC_FF * tp.pitch_acc,
-                                          -PITCH_MAX_TORQUE, PITCH_MAX_TORQUE);
+          const float pitch_out_goal =
+            PITCH_OUT_SIGN * sp::limit_min_max(
+                               pitch_pid.out + TRAJ_PITCH_ACC_FF * TRAJ_AMP_SCALE * tp.pitch_acc,
+                               -PITCH_MAX_TORQUE, PITCH_MAX_TORQUE);
+          pitch_out_ = slew_toward(pitch_out_, pitch_out_goal, PITCH_OUT_SLEW * CONTROL_DT);
           pitch_motor.cmd(pitch_out_);
         }
       }
@@ -440,15 +519,22 @@ extern "C" void gimbal_task()
         yaw_sp_ = YAW_SIGN * stick(remote.ch_rh, STICK_DEADZONE) * YAW_RATE_MAX;
         apply_yaw_soft_limit();
         yaw_pid.calc(yaw_sp_, yaw_motor.speed);
-        yaw_out_ = YAW_OUT_SIGN * yaw_pid.out;
+        yaw_out_ = slew_toward(yaw_out_, YAW_OUT_SIGN * yaw_pid.out, YAW_OUT_SLEW * CONTROL_DT);
         yaw_motor.cmd(yaw_out_);
 
         // 俯仰：左摇杆上下 → 目标角增量 + 位置环（IMU 角度反馈，重力负载必须闭环保持）
+        // 使能第一拍：设定角就地接管成当前角（失能期间被重力放下了也不会一使能就满转矩猛拉）
+        if (pitch_takeover_) {
+          pitch_target_ = sp::limit_min_max(pitch_fb_, PITCH_MIN_RAD, PITCH_MAX_RAD);
+          pitch_pid.clear();
+          pitch_takeover_ = false;
+        }
         float pitch_target_new = pitch_target_ + PITCH_SIGN * stick(remote.ch_lv, STICK_DEADZONE) *
                                                    PITCH_RATE_MAX * CONTROL_DT;
         pitch_target_ = sp::limit_min_max(pitch_target_new, PITCH_MIN_RAD, PITCH_MAX_RAD);
         pitch_pid.calc(pitch_target_, pitch_fb_);
-        pitch_out_ = PITCH_OUT_SIGN * pitch_pid.out;
+        const float pitch_out_goal = PITCH_OUT_SIGN * pitch_pid.out;
+        pitch_out_ = slew_toward(pitch_out_, pitch_out_goal, PITCH_OUT_SLEW * CONTROL_DT);
         pitch_motor.cmd(pitch_out_);
       }
 
@@ -459,7 +545,12 @@ extern "C" void gimbal_task()
       //            还没收到反馈就先不出力（此时电机本来也没上电）。
       float fold_target = 0.0f;
       float fold_goal;
-      if (fold_target_rad(&fold_target)) {
+      // 中档 = 展开：优先于测距/台架指令
+      const bool mid_deploy = FOLD_MID_DEPLOY && (remote.sw_r == sp::DBusSwitchMode::MID);
+      if (mid_deploy) {
+        fold_target = FOLD_DEPLOY_RAD;
+      }
+      if (mid_deploy || fold_target_rad(&fold_target)) {
         fold_hold_rad_ = fold_target;
         fold_hold_valid_ = true;
         fold_goal = fold_target;
@@ -473,13 +564,15 @@ extern "C" void gimbal_task()
         }
         fold_goal = fold_hold_rad_;
       }
-      // 软限位：目标和规划点都不许跑出 [中心-60°, 中心+60°]
-      if (fold_center_valid_) {
-        fold_goal = sp::limit_min_max(
-          fold_goal, fold_center_rad_ - FOLD_SOFT_LIMIT_RAD,
-          fold_center_rad_ + FOLD_SOFT_LIMIT_RAD);
-      }
+      // 软限位：目标和规划点都夹在 [FOLD_LIMIT_LO_RAD, FOLD_LIMIT_HI_RAD]（相对上电零位）
+      fold_goal = sp::limit_min_max(fold_goal, FOLD_LIMIT_LO_RAD, FOLD_LIMIT_HI_RAD);
       if (fold_hold_valid_) {
+        // 重新使能第一拍：规划点就地接管成实际角，避免从旧目标一路冲过来
+        if (fold_resync_ && rx_fresh(fold_rx_ms_, now_ms)) {
+          fold_sp_rad_ = fold_angle();
+          fold_sp_vel_ = 0.0f;
+          fold_resync_ = false;
+        }
         const float fold_err = fold_goal - fold_sp_rad_;
         const float fold_v_des =
           sp::limit_min_max(fold_err * FOLD_SPEED_GAIN, -FOLD_SPEED_MAX, FOLD_SPEED_MAX);
@@ -487,15 +580,15 @@ extern "C" void gimbal_task()
           fold_v_des, fold_sp_vel_ - FOLD_ACC_MAX * CONTROL_DT,
           fold_sp_vel_ + FOLD_ACC_MAX * CONTROL_DT);
         fold_sp_rad_ += fold_sp_vel_ * CONTROL_DT;
-        if (fold_center_valid_) {  // 规划点也夹在软限位里，别让积分绕过
-          fold_sp_rad_ = sp::limit_min_max(
-            fold_sp_rad_, fold_center_rad_ - FOLD_SOFT_LIMIT_RAD,
-            fold_center_rad_ + FOLD_SOFT_LIMIT_RAD);
-        }
+        // 规划点也夹在软限位里，别让积分绕过
+        fold_sp_rad_ = sp::limit_min_max(fold_sp_rad_, FOLD_LIMIT_LO_RAD, FOLD_LIMIT_HI_RAD);
         fold_pid.calc(fold_sp_rad_, fold_angle());
         // 前馈扛重力 + PID 修偏差，一起限幅到 FOLD_MAX_TORQUE
-        fold_out_ = sp::limit_min_max(
-          fold_pid.out + FOLD_FF_SIGN * FOLD_GRAVITY_FF_NM, -FOLD_MAX_TORQUE, FOLD_MAX_TORQUE);
+        // 抗重力前馈：折叠角越大（越接近水平）重力矩越大，用 sin 形状补偿；静差再由积分修
+        const float fold_ff = FOLD_FF_SIGN * FOLD_GRAVITY_FF_NM * sinf(fold_angle());
+        const float fold_out_goal =
+          sp::limit_min_max(fold_pid.out + fold_ff, -FOLD_MAX_TORQUE, FOLD_MAX_TORQUE);
+        fold_out_ = slew_toward(fold_out_, fold_out_goal, FOLD_TORQUE_SLEW * CONTROL_DT);
         fold_motor.cmd(fold_out_);
       }
       else {

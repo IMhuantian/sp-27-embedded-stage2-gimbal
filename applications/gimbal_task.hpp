@@ -48,7 +48,7 @@ constexpr bool PITCH_ON_CAN1 = true;
 // 偏航机械限位：以启用时刻姿态为中心 ±60°，软限位取 55° 留 5° 余量（软限位中心上电只锁一次）。
 constexpr float PITCH_FB_SIGN = -1.0f;           // IMU 俯仰 → "仰为正"约定
 constexpr float PITCH_OUT_SIGN = 1.0f;           // "仰为正"约定 → 电机转矩
-constexpr float YAW_SOFT_LIMIT_RAD = 0.959931f;  // 偏航软限位 ±55°（机械 ±60°）
+constexpr float YAW_SOFT_LIMIT_RAD = 0.785398f;  // 偏航软限位 ±45°（机械 ±60°，事故后从 ±55° 收到 ±45°）
 constexpr float YAW_LIMIT_KP = 5.0f;             // 到界回推增益 (rad/s)/rad
 
 // ---- 机构参数（来自 2026-10-13 建模，详见 指导文档\第二阶段-云台机构与参数（来自建模）.md）----
@@ -61,8 +61,8 @@ constexpr float YAW_LIMIT_KP = 5.0f;             // 到界回推增益 (rad/s)/r
 // 轨迹的 pitch ∈ [-0.523599, +0.523599] rad（±30.00°）、yaw ∈ ±0.392699 rad（±22.50°）。
 // 这段是验收曲线，机构只要能到就必须覆盖，限位收窄会在跟踪中途卡死。
 // TODO(干涉角复核): 若 SW 干涉扫描证明机构到不了 ±30°，以机构为准并同步文档。
-constexpr float PITCH_LIMIT_MIN_RAD = -0.523599f;  // -30.00°（轨迹 pitch 下限）
-constexpr float PITCH_LIMIT_MAX_RAD = 0.523599f;   // +30.00°（轨迹 pitch 上限）
+constexpr float PITCH_LIMIT_MIN_RAD = -0.349066f;  // -20.00°（事故后从 -30° 收到 -20°，保护打印件）
+constexpr float PITCH_LIMIT_MAX_RAD = 0.349066f;   // +20.00°（事故后从 +30° 收到 +20°）
 
 // ---- 4.4.8 轨迹指标（由组委会轨迹文件统计，1 kHz 采样 / 680 ms 整周期 / 起止同点）----
 // 稳态跟踪要按下面的峰值设计：现在是骨架，环路还远远跟不上（见文档 §2.2）。
@@ -76,12 +76,10 @@ constexpr float TRAJ_PITCH_VEL_MAX_RAD_S = 8.309f;  // 峰值 8.3083 rad/s
 constexpr float TRAJ_YAW_ACC_MAX_RAD_S2 = 106.9f;   // 峰值 106.85 rad/s²
 constexpr float TRAJ_PITCH_ACC_MAX_RAD_S2 = 69.1f;  // 峰值 69.04 rad/s²
 // 限位必须覆盖轨迹范围，否则改小了直接编不过（这条比注释更管用）
+// ⚠ 2026/10/21 事故后俯仰行程收到 ±20°，而轨迹要求 ±30°，两者已对不上。
+// 这里不再硬断言"必须覆盖轨迹"，只在打开 TRAJ_ENABLE 前自己确认结构强度。
 static_assert(
-  PITCH_LIMIT_MAX_RAD >= TRAJ_PITCH_LIMIT_RAD,
-  "PITCH_LIMIT_MAX_RAD must cover the required trajectory range");
-static_assert(
-  PITCH_LIMIT_MIN_RAD <= -TRAJ_PITCH_LIMIT_RAD,
-  "PITCH_LIMIT_MIN_RAD must cover the required trajectory range");
+  PITCH_LIMIT_MAX_RAD > 0.0f && PITCH_LIMIT_MIN_RAD < 0.0f, "俯仰限位必须跨过 0");
 // 以下几何量来自 2026-10-14 版建模实测（GetXform/GetBox，单位 m，以底板底面为 0）
 constexpr float YAW_AXIS_HEIGHT_M = 0.0494f;     // YAW 转子面高（底板底面→yaw 转子面 49.4 mm）
 constexpr float YAW_TO_FOLD_DIST_M = 0.001f;     // YAW 轴↔折叠轴：基本共点（实测偏心 1 mm）
