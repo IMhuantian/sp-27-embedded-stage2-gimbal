@@ -33,7 +33,7 @@ constexpr float FOLD_TRIGGER_CM = 80.0f;
 // 展开阈值：比触发阈值大（回差），又不能超过 GY-56 量程 120 cm
 constexpr float FOLD_RELEASE_CM = 115.0f;
 // 收折后至少保持这么久再允许展开（隧道长度 / 车速：3 s ≈ 1.8 m @0.6 m/s）
-constexpr uint32_t FOLD_MIN_HOLD_MS = 3000u;
+constexpr uint32_t FOLD_MIN_HOLD_MS = 5000u;  // 折下去 5 s 后自动展开（与测距无关）
 constexpr uint32_t FOLD_DEBOUNCE_MS = 300;       // 条件连续满足这么久才切状态
 constexpr uint32_t FOLD_MOVE_TIMEOUT_MS = 3000;  // 动作超时 → FAULT 并停机
 static_assert(
@@ -81,6 +81,9 @@ enum class FoldState : uint8_t
 
 // 折叠决策（在 FoldTask 里周期调用，周期建议 10 ms）
 void fold_update(uint32_t now_ms);
+
+// 换档时重新允许"折叠一次"（同一档位内不会反复折叠）
+void fold_arm();
 
 // 折叠电机的目标角（rad，相对上电位置）。
 // 返回 false = 现在不该驱动折叠电机（未使能 / 未到动作条件 / 已到位 / FAULT）。

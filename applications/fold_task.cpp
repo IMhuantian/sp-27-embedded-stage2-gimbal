@@ -29,12 +29,18 @@ uint32_t cond_since_ = 0;
 // 动作超时（4.4.7 的"异常退出保护"）
 uint32_t move_start_ = 0;
 uint32_t folded_since_ = 0;  // 进入 FOLDED 的时刻（展开前的保持计时）
+bool s_armed = true;         // 本档位还剩几次"折叠"配额（换档时由 fold_arm() 重新上膛）
 }  // namespace
 
 bool fold_target_rad(float * target_rad)
 {
   if (target_rad != nullptr) *target_rad = has_target_ ? target_rad_ : 0.0f;
   return has_target_;
+}
+
+void fold_arm()
+{
+  s_armed = true;
 }
 
 void fold_update(uint32_t now_ms)
@@ -62,14 +68,11 @@ void fold_update(uint32_t now_ms)
   float dist_cm = -1.0f;
   const bool dist_ok = tof_get_distance(&dist_cm, now_ms);
 
-  // ---- 2) 条件 + 回差 + 去抖（避免阈值附近频繁切换）----
-  //     收折：距离有效且 < 触发阈值；
-  //     展开：距离 > 释放阈值，或“前方已经没有东西”（超量程/无效读数）；
+  // ---- 2) 触发条件 + 去抖 ----
+  //     只有"收折"看条件：距离有效且 < 触发阈值。
+  //     展开不看距离：折下去之后计时 FOLD_MIN_HOLD_MS（5 s）就自动展开。
   //     通信异常（无帧/超时/帧错）时保持当前状态，不因为"看不见"就乱动机构。
-  const bool far = dist_ok ? (dist_cm > FOLD_RELEASE_CM) : (tof_status == TOF_STATUS_RANGE);
-  const bool cond = (state_ == FoldState::FOLDED || state_ == FoldState::UNFOLDING)
-                      ? far
-                      : (dist_ok && dist_cm < FOLD_TRIGGER_CM);
+  const bool cond = dist_ok && dist_cm < FOLD_TRIGGER_CM;
   if (cond != cond_last_) {
     cond_last_ = cond;
     cond_since_ = now_ms;
@@ -80,7 +83,8 @@ void fold_update(uint32_t now_ms)
   // ---- 3) 状态机（动作按“时间到”判定完成，不依赖距离怎么变）----
   switch (state_) {
     case FoldState::IDLE:
-      if (cond_stable) {
+      if (cond_stable && s_armed) {
+        s_armed = false;  // 本档位只折一次；再折要换档（fold_arm）
         state_ = FoldState::FOLDING;
         has_target_ = true;
         target_rad_ = FOLD_STOW_RAD;
@@ -103,8 +107,8 @@ void fold_update(uint32_t now_ms)
       break;
 
     case FoldState::FOLDED:
-      // 收折后至少保持 FOLD_MIN_HOLD_MS（≈隧道长度 / 车速），再允许展开
-      if (cond_stable && (now_ms - folded_since_ >= FOLD_MIN_HOLD_MS)) {
+      // 折下去满 FOLD_MIN_HOLD_MS（5 s）就自动展开，与距离/测距状态无关
+      if ((now_ms - folded_since_) >= FOLD_MIN_HOLD_MS) {
         state_ = FoldState::UNFOLDING;
         has_target_ = true;
         target_rad_ = FOLD_DEPLOY_RAD;

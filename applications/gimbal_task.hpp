@@ -61,8 +61,8 @@ constexpr float YAW_LIMIT_KP = 5.0f;             // 到界回推增益 (rad/s)/r
 // 轨迹的 pitch ∈ [-0.523599, +0.523599] rad（±30.00°）、yaw ∈ ±0.392699 rad（±22.50°）。
 // 这段是验收曲线，机构只要能到就必须覆盖，限位收窄会在跟踪中途卡死。
 // TODO(干涉角复核): 若 SW 干涉扫描证明机构到不了 ±30°，以机构为准并同步文档。
-constexpr float PITCH_LIMIT_MIN_RAD = -0.349066f;  // -20.00°（事故后从 -30° 收到 -20°，保护打印件）
-constexpr float PITCH_LIMIT_MAX_RAD = 0.349066f;   // +20.00°（事故后从 +30° 收到 +20°）
+constexpr float PITCH_LIMIT_MIN_RAD = -0.523599f;  // -35.00°（现场设定；轨迹只需 ±30°，留 5° 余量）
+constexpr float PITCH_LIMIT_MAX_RAD = 0.523599f;   // +35.00°（现场设定；轨迹只需 ±30°，留 5° 余量）
 
 // ---- 4.4.8 轨迹指标（由组委会轨迹文件统计，1 kHz 采样 / 680 ms 整周期 / 起止同点）----
 // 稳态跟踪要按下面的峰值设计：现在是骨架，环路还远远跟不上（见文档 §2.2）。
@@ -90,5 +90,13 @@ constexpr float PITCH_TO_TOF_DIST_M = 0.0653f;   // 俯仰轴↔测距模块（�
 constexpr float AMBIENT_ENVELOPE_MM =
   304.3f;                               // 整机高度 304.3 mm（210×304×293 包络），折叠后高度判据用
 constexpr float GIMBAL_MASS_KG = 0.0f;  // TODO(机械组给) 云台转动部分质量（重力前馈用）
+
+// ---- 4.4.8 评分程序（规则手册 V2.1.0 §7.4.1）--------------------------------
+// 组委会统一提供，代码逐字照抄；必须在 1 ms 周期的 FreeRTOS 任务里调用。
+// 本工程在 gimbal_task() 的 1 kHz 控制环里每拍调用（见 gimbal_task.cpp），
+// 实测角一律用 IMU 原始值：yaw_detect(imu.yaw, plan_yaw, &r) /
+// pitch_detect(imu.pitch, plan_pitch, &r)，不翻转、不加偏移。
+void yaw_detect(float gimbal_angle, float plan_angle, float* fire_ratio);
+void pitch_detect(float gimbal_angle, float plan_angle, float* fire_ratio);
 
 #endif  // GIMBAL_TASK_HPP
