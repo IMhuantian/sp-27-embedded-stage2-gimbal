@@ -1,6 +1,17 @@
 #include "cmsis_os.h"
 #include "io/bmi088/bmi088.hpp"
 #include "tools/mahony/mahony.hpp"
+#include "imu_feedback.hpp"
+
+namespace { ImuFeedback published; }
+
+ImuFeedback imu_feedback_read()
+{
+  taskENTER_CRITICAL();
+  const ImuFeedback value = published;
+  taskEXIT_CRITICAL();
+  return value;
+}
 
 // bmi088 坐标系到机体系的旋转矩阵。
 // 按"C 板横装、CAN 一侧朝前"填，装法变了要跟着改，怎么定见 sp_middleware/io/bmi088/readme.md
@@ -19,6 +30,9 @@ extern "C" void imu_task()
   while (true) {
     bmi088.update();
     imu.update(bmi088.acc, bmi088.gyro);
+    taskENTER_CRITICAL();
+    published = {imu.yaw, imu.pitch, imu.roll, osKernelSysTick(), true};
+    taskEXIT_CRITICAL();
     osDelay(1);
   }
 }

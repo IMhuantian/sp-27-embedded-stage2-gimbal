@@ -48,7 +48,8 @@ constexpr bool PITCH_ON_CAN1 = true;
 // 偏航机械限位：以启用时刻姿态为中心 ±60°，软限位取 55° 留 5° 余量（软限位中心上电只锁一次）。
 constexpr float PITCH_FB_SIGN = -1.0f;           // IMU 俯仰 → "仰为正"约定
 constexpr float PITCH_OUT_SIGN = 1.0f;           // "仰为正"约定 → 电机转矩
-constexpr float YAW_SOFT_LIMIT_RAD = 0.785398f;  // 偏航软限位 ±45°（机械 ±60°，事故后从 ±55° 收到 ±45°）
+constexpr float YAW_SOFT_MIN_RAD = -0.785398163397f;  // -45 degrees relative to power-on zero
+constexpr float YAW_SOFT_MAX_RAD = 0.698131700798f;  // +40 degrees relative to power-on zero
 constexpr float YAW_LIMIT_KP = 5.0f;             // 到界回推增益 (rad/s)/rad
 
 // ---- 机构参数（来自 2026-10-13 建模，详见 指导文档\第二阶段-云台机构与参数（来自建模）.md）----
@@ -61,8 +62,16 @@ constexpr float YAW_LIMIT_KP = 5.0f;             // 到界回推增益 (rad/s)/r
 // 轨迹的 pitch ∈ [-0.523599, +0.523599] rad（±30.00°）、yaw ∈ ±0.392699 rad（±22.50°）。
 // 这段是验收曲线，机构只要能到就必须覆盖，限位收窄会在跟踪中途卡死。
 // TODO(干涉角复核): 若 SW 干涉扫描证明机构到不了 ±30°，以机构为准并同步文档。
-constexpr float PITCH_LIMIT_MIN_RAD = -0.349066f;  // -20.00°（事故后从 -30° 收到 -20°，保护打印件）
-constexpr float PITCH_LIMIT_MAX_RAD = 0.349066f;   // +20.00°（事故后从 +30° 收到 +20°）
+constexpr bool PITCH_POSITION_LIMIT_ENABLE = false;  // user requested removal of pitch angle bounds
+constexpr float PITCH_LIMIT_MIN_RAD = -0.872664625997f;  // fallback only when bounds enabled
+constexpr float PITCH_LIMIT_MAX_RAD = 0.872664625997f;  // +50 degrees; requested software range, clearance unverified
+
+inline float pitch_limit_target(float target, bool enabled = PITCH_POSITION_LIMIT_ENABLE)
+{
+  if (!enabled) return target;
+  return target < PITCH_LIMIT_MIN_RAD ? PITCH_LIMIT_MIN_RAD :
+    (target > PITCH_LIMIT_MAX_RAD ? PITCH_LIMIT_MAX_RAD : target);
+}
 
 // ---- 4.4.8 轨迹指标（由组委会轨迹文件统计，1 kHz 采样 / 680 ms 整周期 / 起止同点）----
 // 稳态跟踪要按下面的峰值设计：现在是骨架，环路还远远跟不上（见文档 §2.2）。
