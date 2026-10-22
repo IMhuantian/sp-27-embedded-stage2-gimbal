@@ -56,6 +56,7 @@ osThreadId UartTaskHandle;
 osThreadId LedTaskHandle;
 osThreadId BuzzerTaskHandle;
 osThreadId TofTaskHandle;
+osThreadId TrajTaskHandle;
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -71,6 +72,7 @@ extern void uart_task(void const * argument);
 extern void led_task(void const * argument);
 extern void buzzer_task(void const * argument);
 extern void tof_task(void const * argument);
+extern void traj_task(void const * argument);
 
 extern void MX_USB_DEVICE_Init(void);
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
@@ -153,6 +155,10 @@ void MX_FREERTOS_Init(void) {
   /* definition and creation of TofTask */
   osThreadDef(TofTask, tof_task, osPriorityNormal, 0, 256);
   TofTaskHandle = osThreadCreate(osThread(TofTask), NULL);
+
+  /* definition and creation of TrajTask (4.4.8 轨迹给定, 独立任务 1kHz) */
+  osThreadDef(TrajTask, traj_task, osPriorityNormal, 0, 256);
+  TrajTaskHandle = osThreadCreate(osThread(TrajTask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */

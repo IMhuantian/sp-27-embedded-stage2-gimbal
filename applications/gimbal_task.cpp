@@ -33,6 +33,7 @@
 #include "tools/math_tools/math_tools.hpp"
 #include "tools/pid/pid.hpp"
 #include "trajectory_task.hpp"
+#include "traj_task.hpp"
 
 // 定义在 uart_task.cpp / imu_task.cpp
 extern sp::DBus remote;
@@ -154,7 +155,7 @@ constexpr uint32_t STARTUP_WAIT_MS = 1000;  // 等电机上电自检 + 第一帧
 // ---- 4.4.8 目标轨迹跟踪（组委会 trajectory_task，默认关）------------------
 // 轨迹指标：680 ms 整周期、1 kHz 采样、起止同点；pitch ±30.00°（峰值 8.31 rad/s / 69 rad/s²），
 // yaw ±22.50°（峰值 7.15 rad/s / 107 rad/s²）。
-// 实现选择：直接调 trajectory_sample_at_ms() 取给定，不再单开一个任务 —— 控制环本身就是
+// 实现选择：给定由独立任务 traj_task（4.4.8 要求）每 1 ms 采样组委会轨迹表后发布，
 // 1 kHz，多一个任务只会多一层调度抖动（组委会 readme 里那个任务照样编译进来，不用它也行）。
 // 跟踪策略：前馈 + 外环，而不是纯 PI 追误差。
 //   yaw  : 角度外环 P → 角速度给定 = Kp*(θ_ref − θ_imu) + k_v*ω_ref → 原有速率环
@@ -194,6 +195,10 @@ constexpr uint32_t TRAJ_PREPOS_TIMEOUT_MS = 2500u;
 // 上档那一拍的 IMU 姿态（零点），参考与评分共用
 float traj_imu_yaw0_ = 0.0f;
 float traj_imu_pitch0_ = 0.0f;  // 4 s 还没到位就强行开始（分数会体现）
+
+// 只做偏航跟随（俯仰机械做不好跟随）：轨迹段偏航照常跟，俯仰锁在当前角不动。
+// 评分仍是官方公式（CH17 上限 40），此时看 CH15 的偏航命中率、折算上限 20 分。
+constexpr bool TRAJ_YAW_ONLY = true;
 
 constexpr bool TRAJ_DRYRUN = false;
 // 预演：true = 不看遥控器也不看拨杆，上电就循环播放参考曲线（只给波形看；配合 TRAJ_DRYRUN 电机不出力）
@@ -395,7 +400,8 @@ void disable_all()
   fold_active_ = false;
   fold_hold_valid_ = false;    // 下档失能时不允许顶住（安全要求），下次使能重新锁存当前位置
   fold_center_valid_ = false;  // 软限位中心也重新锁存
-  traj_started_ = false;       // 失能一次就从头跑轨迹，不接着上次的相位
+  traj_started_ = false;
+    traj_task_stop();       // 失能一次就从头跑轨迹，不接着上次的相位
   traj_ref_yaw_ = 0.0f;
   traj_ref_pitch_ = 0.0f;
   if (GIMBAL_ENABLE) send_frames();
@@ -630,23 +636,27 @@ extern "C" void gimbal_task()
           if (traj_prepos_start_ms_ == 0u) traj_prepos_start_ms_ = now_ms;
           tp = trajectory_sample_at_ms(0);  // 起点：角速度/角加速度都是 0，前馈项自然为 0
           yaw_ref = tp.yaw;
-          pitch_ref = sp::limit_min_max(
-            TRAJ_PITCH_SIGN * PITCH_FB_SIGN * tp.pitch, -TRAJ_PREPOS_PITCH_MAX_RAD,
-            TRAJ_PREPOS_PITCH_MAX_RAD);
+          pitch_ref = TRAJ_YAW_ONLY
+                        ? pitch_fb_
+                        : sp::limit_min_max(
+                            TRAJ_PITCH_SIGN * PITCH_FB_SIGN * tp.pitch, -TRAJ_PREPOS_PITCH_MAX_RAD,
+                            TRAJ_PREPOS_PITCH_MAX_RAD);
           traj_ref_yaw_ = yaw_ref;
           traj_ref_pitch_ = pitch_ref;
           const bool arrived = (fabsf(yaw_ref - imu.yaw) < TRAJ_PREPOS_TOL_RAD) &&
-                               (fabsf(pitch_ref - pitch_fb_) < TRAJ_PREPOS_TOL_RAD);
+                               (TRAJ_YAW_ONLY || fabsf(pitch_ref - pitch_fb_) < TRAJ_PREPOS_TOL_RAD);
           if (arrived || (now_ms - traj_prepos_start_ms_) > TRAJ_PREPOS_TIMEOUT_MS) {
             traj_prepos_done_ = true;
             traj_prepos_start_ms_ = 0u;
-            traj_started_ = false;  // 下一拍从相位 0 开始跑轨迹
+            traj_started_ = false;
+    traj_task_stop();  // 下一拍从相位 0 开始跑轨迹
           }
         }
         else {
           if (!traj_started_) {
             traj_start_ms_ = now_ms;
             traj_started_ = true;
+    traj_task_start(traj_start_ms_);
             traj_yaw_ratio_ = 0.0f;  // 每次上档都从头统计，别接着上一次的数
             traj_pitch_ratio_ = 0.0f;
             traj_score_ = 0.0f;
@@ -658,8 +668,11 @@ extern "C" void gimbal_task()
             traj_tp0_yaw_ = tp0.yaw;
             traj_tp0_pitch_ = tp0.pitch;
             traj_anchor_valid_ = true;
+            if (TRAJ_YAW_ONLY) {
+              pitch_target_ = sp::limit_min_max(pitch_fb_, PITCH_MIN_RAD, PITCH_MAX_RAD);
+            }
           }
-          tp = trajectory_sample_at_ms(now_ms - traj_start_ms_);
+          tp = traj_task_latest();
           yaw_ref = tp.yaw;
           pitch_ref = TRAJ_PITCH_SIGN * PITCH_FB_SIGN * tp.pitch;
           // 参考角 = 零点 + 幅度系数 × (官方曲线 − 曲线起点)。
@@ -716,7 +729,10 @@ extern "C" void gimbal_task()
           const float pitch_target_goal = sp::limit_min_max(
             pitch_ref + TRAJ_PITCH_LEAD_S * TRAJ_AMP_SCALE * tp.pitch_vel, PITCH_MIN_RAD,
             PITCH_MAX_RAD);
-          pitch_target_ = slew_toward(pitch_target_, pitch_target_goal, TRAJ_REF_SLEW * CONTROL_DT);
+          if (!TRAJ_YAW_ONLY) {
+            pitch_target_ =
+              slew_toward(pitch_target_, pitch_target_goal, TRAJ_REF_SLEW * CONTROL_DT);
+          }
           // 误差保护：目标离实际超过 10° 时，只按 10° 的误差出力（慢拉回）。
           // 既不猛砸机械限位，也不会因为误差太大就把出力清零而卡死（俯仰的重心在轴上方，
           // 一旦没力矩就会自己倒向一侧，所以绝对不能长期给 0）。
@@ -728,15 +744,18 @@ extern "C" void gimbal_task()
           }
           pitch_pid.calc(pitch_target_use, pitch_fb_, PITCH_I_PAUSE_RAD);
           const float pitch_out_goal =
-            PITCH_OUT_SIGN * sp::limit_min_max(
-                               pitch_pid.out + TRAJ_PITCH_ACC_FF * TRAJ_AMP_SCALE * tp.pitch_acc,
-                               -PITCH_MAX_TORQUE, PITCH_MAX_TORQUE);
+            PITCH_OUT_SIGN *
+              sp::limit_min_max(
+                pitch_pid.out +
+                  (TRAJ_YAW_ONLY ? 0.0f : TRAJ_PITCH_ACC_FF * TRAJ_AMP_SCALE * tp.pitch_acc),
+                -PITCH_MAX_TORQUE, PITCH_MAX_TORQUE);
           pitch_out_ = slew_toward(pitch_out_, pitch_out_goal, PITCH_OUT_SLEW * CONTROL_DT);
           pitch_motor.cmd(pitch_out_);
         }
       }
       else {
-        traj_started_ = false;  // 离开上档就复位相位：下次上档从轨迹起点重新跑
+        traj_started_ = false;
+    traj_task_stop();  // 离开上档就复位相位：下次上档从轨迹起点重新跑
         // 偏航：右摇杆左右 → 角速度环（用电机自身编码器速度，不依赖 IMU 安装方向）
         yaw_sp_ = YAW_SIGN * stick(remote.ch_rh, STICK_DEADZONE) * YAW_RATE_MAX;
         apply_yaw_soft_limit();
@@ -854,8 +873,9 @@ extern "C" void gimbal_task()
       if (!traj_started_) {
         traj_start_ms_ = now_ms;
         traj_started_ = true;
+    traj_task_start(traj_start_ms_);
       }
-      const TrajectoryPoint tp_prev = trajectory_sample_at_ms(now_ms - traj_start_ms_);
+      const TrajectoryPoint tp_prev = traj_task_latest();
       traj_ref_yaw_ = tp_prev.yaw;
       traj_ref_pitch_ = tp_prev.pitch;
       traj_active_ = true;

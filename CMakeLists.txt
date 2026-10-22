@@ -66,6 +66,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     applications/gimbal_task.cpp
     applications/fold_task.cpp
     applications/trajectory_task.cpp
+    applications/traj_task.cpp
     sp_middleware/io/can/can.cpp
     sp_middleware/motor/rm_motor/rm_motor.cpp
     sp_middleware/tools/pid/pid.cpp
