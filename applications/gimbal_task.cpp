@@ -88,9 +88,9 @@ constexpr float PITCH_RATE_MAX = 0.8f;  // rad/s：左摇杆上下满推（事�
 // 俯仰机械限位的唯一出处是 gimbal_task.hpp 里的 PITCH_LIMIT_MIN/MAX_RAD（值待建模实测）
 constexpr float PITCH_MIN_RAD = PITCH_LIMIT_MIN_RAD;  // 俯仰机械下限
 constexpr float PITCH_MAX_RAD = PITCH_LIMIT_MAX_RAD;  // 俯仰机械上限
-constexpr float YAW_MAX_TORQUE = 1.5f;                // N·m：全幅跟踪出力试验，原 0.3，需实机复测
+constexpr float YAW_MAX_TORQUE = 0.6f;                // N·m：0.4 试过会62%时间顶上限、Yaw跑飞，回退到0.6（软化后的最佳）
 constexpr float PITCH_MAX_TORQUE =
-  0.6f;  // N·m：全幅下行需求约0.31 N·m 贴0.3上限，与Yaw同档放宽到0.4；机械件能否承受需实机观察
+  0.7f;  // N·m：速度P提到0.40后实测峰值已顶满0.6，放宽到0.7给控制留余量；结构已刚性固定
 constexpr float FOLD_MAX_TORQUE = 1.2f;  // 折叠 GM6020 上限（驱动层封顶 2.223 N·m）；事故后 2.2→1.2
 constexpr bool FOLD_TORQUE_PLOT = false;  // 5 号通道显折叠输出转矩 N·m（偏航未启用时调试用）
 constexpr bool YAW_SPEED_PLOT =
@@ -129,7 +129,7 @@ constexpr float FOLD_SPEED_GAIN = 4.0f;  // 1/s：接近目标时按这个增益
 // 做法：使能第一拍把设定角/规划点“就地接管”成当前实际角，再加上出力变化率限制。
 constexpr float PITCH_OUT_SLEW = 50.0f;   // N·m/s：俯仰出力变化率上限（80 试过：谷底只改善0.4度，整体更差，已回退）
 constexpr float FOLD_TORQUE_SLEW = 8.0f;  // N·m/s：折叠出力变化率上限（8 → 1.2 N·m 约 150 ms）
-constexpr float YAW_OUT_SLEW = 80.0f;     // N·m/s：实测31.7%时间贴50上限而转矩只用0.86→提到80降低指令滞后
+constexpr float YAW_OUT_SLEW = 30.0f;     // N·m/s：80->30；20 无额外收益，回到30
 constexpr float STICK_DEADZONE = 0.02f;
 
 // 方向：现场确认后如反了就把对应 SIGN 取反（与底盘工程 FWD_DIR / SIDE_DIR / ROT_DIR 同一套路）
@@ -189,7 +189,7 @@ sp::PID yaw_pid(CONTROL_DT, 0.6f, 0.2f, 0.0f, YAW_MAX_TORQUE, YAW_MAX_TORQUE, 0.
 // Pitch: angle P -> velocity PI, in output-side rad/s and Nm.
 pitch_cascade::Controller pitch_controller;
 const pitch_cascade::Config pitch_config{
-  6.0f, 0.32f, 0.3f, TRAJ_REF_SLEW, PITCH_MAX_TORQUE, PITCH_OUT_SLEW};
+  6.0f, 0.40f, 0.3f, TRAJ_REF_SLEW, PITCH_MAX_TORQUE, PITCH_OUT_SLEW};  // 速度P 0.32->0.40：下行滞后2.8度时只发出0.19Nm
 // Unverified physical sign: positive motor speed is assumed to mean positive joint pitch.
 constexpr float PITCH_RATE_FB_SIGN = 1.0f;
 static_assert(PITCH_OUT_SIGN == 1.0f || PITCH_OUT_SIGN == -1.0f, "Invalid pitch torque sign");
@@ -262,6 +262,16 @@ float yaw_angle()
 {
   return motor_feedback.yaw_zero_valid ? (motor_feedback.yaw_angle - motor_feedback.yaw_zero)
                                        : motor_feedback.yaw_angle;
+}
+
+// 诊断专用（不可用于比赛）：打开后偏航电机恒不出力，用来测量"Yaw 不转时 Pitch 能好多少"。
+// 评分仍按真实参考计算，所以 Yaw 那一半会掉到接近 0，总分只反映 Pitch 的水平。
+constexpr bool YAW_TORQUE_DISABLE_TEST = false;
+
+void yaw_command(float torque)
+{
+  yaw_out_ = YAW_TORQUE_DISABLE_TEST ? 0.0f : torque;
+  yaw_motor.cmd(yaw_out_);
 }
 
 // 摇杆死区 + 线性重映射(过零连续，满量程仍是 ±1)
@@ -664,7 +674,7 @@ extern "C" void gimbal_task()
           yaw_pid.calc(yaw_sp_, motor_feedback.yaw_speed);
           yaw_out_ = slew_toward(yaw_out_, YAW_OUT_SIGN * yaw_pid.out, YAW_OUT_SLEW * CONTROL_DT);
           if (yaw_out_ != YAW_OUT_SIGN * yaw_pid.out) trial_flags_ |= 16u;
-          yaw_motor.cmd(yaw_out_);
+          yaw_command(yaw_out_);
           if (std::fabs(yaw_pid.out) >= YAW_MAX_TORQUE) trial_flags_ |= 8u;
 
           // Pitch: raw trajectory angle -> outer P + velocity FF -> inner velocity PI.
@@ -698,7 +708,7 @@ extern "C" void gimbal_task()
         apply_yaw_soft_limit();
         yaw_pid.calc(yaw_sp_, motor_feedback.yaw_speed);
         yaw_out_ = slew_toward(yaw_out_, YAW_OUT_SIGN * yaw_pid.out, YAW_OUT_SLEW * CONTROL_DT);
-        yaw_motor.cmd(yaw_out_);
+        yaw_command(yaw_out_);
 
         // 俯仰：左摇杆上下 → 目标角增量 + 位置环（IMU 角度反馈，重力负载必须闭环保持）
         // 使能第一拍：设定角就地接管成当前角（失能期间被重力放下了也不会一使能就满转矩猛拉）
