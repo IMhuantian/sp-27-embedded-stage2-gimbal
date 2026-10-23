@@ -17,16 +17,17 @@ struct Envelope {
 
 inline bool fits(const Envelope & envelope, float pitch_anchor, float yaw_anchor,
                  float pitch_lo, float pitch_hi, float yaw_lo, float yaw_hi,
-                 bool pitch_limit_enabled = true) {
+                 bool pitch_limit_enabled = true, bool yaw_limit_enabled = true) {
   return std::isfinite(envelope.pitch_min) && std::isfinite(envelope.pitch_max) &&
     std::isfinite(envelope.yaw_min) && std::isfinite(envelope.yaw_max) &&
     std::isfinite(pitch_anchor) && std::isfinite(yaw_anchor) &&
     (!pitch_limit_enabled ||
       (envelope.pitch_min + pitch_anchor >= pitch_lo &&
        envelope.pitch_max + pitch_anchor <= pitch_hi)) &&
-    std::isfinite(yaw_lo) && std::isfinite(yaw_hi) && yaw_lo < yaw_hi &&
-    envelope.yaw_min + yaw_anchor >= yaw_lo &&
-    envelope.yaw_max + yaw_anchor <= yaw_hi;
+    (!yaw_limit_enabled ||
+      (std::isfinite(yaw_lo) && std::isfinite(yaw_hi) && yaw_lo < yaw_hi &&
+       envelope.yaw_min + yaw_anchor >= yaw_lo &&
+       envelope.yaw_max + yaw_anchor <= yaw_hi));
 }
 
 // Checks the complete mapped reference, including the existing pitch lead.

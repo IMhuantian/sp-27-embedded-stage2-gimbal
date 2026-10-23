@@ -48,6 +48,7 @@ constexpr bool PITCH_ON_CAN1 = true;
 // 偏航机械限位：以启用时刻姿态为中心 ±60°，软限位取 55° 留 5° 余量（软限位中心上电只锁一次）。
 constexpr float PITCH_FB_SIGN = -1.0f;           // IMU 俯仰 → "仰为正"约定
 constexpr float PITCH_OUT_SIGN = 1.0f;           // "仰为正"约定 → 电机转矩
+constexpr bool YAW_POSITION_LIMIT_ENABLE = false;  // User requested no yaw position clamp or pushback.
 constexpr float YAW_SOFT_MIN_RAD = -0.785398163397f;  // -45 degrees relative to power-on zero
 constexpr float YAW_SOFT_MAX_RAD = 0.698131700798f;  // +40 degrees relative to power-on zero
 constexpr float YAW_LIMIT_KP = 5.0f;             // 到界回推增益 (rad/s)/rad

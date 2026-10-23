@@ -25,21 +25,24 @@
 
 #include "cmsis_os.h"
 #include "fold_task.hpp"
+#include "imu_feedback.hpp"
 #include "io/can/can.hpp"
 #include "io/dbus/dbus.hpp"
 #include "motor/rm_motor/rm_motor.hpp"
+#include "pitch_cascade.hpp"
 #include "tof_task.hpp"
 #include "tools/math_tools/math_tools.hpp"
 #include "tools/pid/pid.hpp"
+#include "trajectory_score.hpp"
 #include "trajectory_task.hpp"
 #include "trajectory_trial.hpp"
-#include "trajectory_score.hpp"
-#include "pitch_cascade.hpp"
-#include "imu_feedback.hpp"
 
 // 定义在 uart_task.cpp / imu_task.cpp
 extern sp::DBus remote;
-namespace { ImuFeedback attitude; }
+namespace
+{
+ImuFeedback attitude;
+}
 
 // Current fixed trial page: 18 channels; 14/15 ratios, 16 mean score, 17 flags.
 // Full mapping: docs/TRAJECTORY_SCORE.md. Legacy/manual page notes below.
@@ -70,7 +73,8 @@ uint32_t can2_rx_ms_ = 0;  // CAN2 同上
 
 namespace
 {
-struct MotorFeedback {
+struct MotorFeedback
+{
   float yaw_angle = 0.0f, fold_angle = 0.0f;
   float yaw_speed = 0.0f, pitch_speed = 0.0f;
   uint32_t yaw_stamp = 0, pitch_stamp = 0, fold_stamp = 0;
@@ -85,9 +89,9 @@ constexpr float PITCH_RATE_MAX = 0.8f;  // rad/s：左摇杆上下满推（事�
 // 俯仰机械限位的唯一出处是 gimbal_task.hpp 里的 PITCH_LIMIT_MIN/MAX_RAD（值待建模实测）
 constexpr float PITCH_MIN_RAD = PITCH_LIMIT_MIN_RAD;  // 俯仰机械下限
 constexpr float PITCH_MAX_RAD = PITCH_LIMIT_MAX_RAD;  // 俯仰机械上限
-constexpr float YAW_MAX_TORQUE = 0.3f;  // GM6020 满量程 2.223 N·m；事故后收到 0.3，机构验证过再放开
+constexpr float YAW_MAX_TORQUE = 0.8f;                // N·m：全幅跟踪出力试验，原 0.3，需实机复测
 constexpr float PITCH_MAX_TORQUE =
-  0.3f;                                  // 事故后 1.8 → 0.5 → 0.3：PLA 件扛不住，换件验证后再逐步加
+  0.6f;  // N·m：全幅下行需求约0.31 N·m 贴0.3上限，与Yaw同档放宽到0.4；机械件能否承受需实机观察
 constexpr float FOLD_MAX_TORQUE = 1.2f;  // 折叠 GM6020 上限（驱动层封顶 2.223 N·m）；事故后 2.2→1.2
 constexpr bool FOLD_TORQUE_PLOT = false;  // 5 号通道显折叠输出转矩 N·m（偏航未启用时调试用）
 constexpr bool YAW_SPEED_PLOT =
@@ -97,7 +101,7 @@ constexpr bool YAW_SPEED_PLOT =
 // 事故：折叠被重力压下来 → 上段倒下 → IMU 姿态剧变 → 俯仰环还在按轨迹纠偏 →
 //       3D 打印件承受异常扭矩被扯断。原则：机构姿态一旦异常就"撒手"(0 转矩)，
 //       绝不用大转矩去救；并且折叠不在展开位时根本不许进轨迹跟踪。
-constexpr bool ATTITUDE_GUARD_ENABLE = false;          // 姿态异常 → 立即失能（原因码 5）
+constexpr bool ATTITUDE_GUARD_ENABLE = false;         // 姿态异常 → 立即失能（原因码 5）
 constexpr float GUARD_ROLL_MAX_RAD = 0.261799f;       // 15°：横滚超限说明上段倒了/机构翻了
 constexpr float GUARD_PITCH_ERR_MAX_RAD = 0.349066f;  // 20°：跟随差这么多且已在出力 → 被判卡住
 constexpr uint32_t GUARD_TRIP_MS = 50u;               // 连续超限 50 ms 才触发（滤掉瞬时冲击）
@@ -124,9 +128,9 @@ constexpr float FOLD_SPEED_GAIN = 4.0f;  // 1/s：接近目标时按这个增益
 // ---- 使能瞬间的柔和处理（避免切档时猛拉/猛冲）----
 // 失能期间机构会被重力放下来；重新使能时若还按“上电时的设定角”闭环，误差很大 → 第一拍就满转矩。
 // 做法：使能第一拍把设定角/规划点“就地接管”成当前实际角，再加上出力变化率限制。
-constexpr float PITCH_OUT_SLEW = 3.0f;    // N·m/s：俯仰出力变化率上限（3 → 0.3 N·m 约 100 ms）
+constexpr float PITCH_OUT_SLEW = 50.0f;   // N·m/s：俯仰出力变化率上限；±0.3 N·m 反向切换约 37.5 ms
 constexpr float FOLD_TORQUE_SLEW = 8.0f;  // N·m/s：折叠出力变化率上限（8 → 1.2 N·m 约 150 ms）
-constexpr float YAW_OUT_SLEW = 8.0f;      // N·m/s：偏航出力变化率上限（事故后新加，防阶跃）
+constexpr float YAW_OUT_SLEW = 50.0f;     // N·m/s：单参数试验；±0.4 N·m 换向约 40 ms
 constexpr float STICK_DEADZONE = 0.02f;
 
 // 方向：现场确认后如反了就把对应 SIGN 取反（与底盘工程 FWD_DIR / SIDE_DIR / ROT_DIR 同一套路）
@@ -153,12 +157,12 @@ constexpr bool TRAJ_ENABLE = true;  // 编译期总开关；运行时还要把�
 constexpr bool TRAJ_DRYRUN = false;
 // 预演：true = 不看遥控器也不看拨杆，上电就循环播放参考曲线（只给波形看；配合 TRAJ_DRYRUN 电机不出力）
 constexpr bool TRAJ_PREVIEW = false;
-constexpr bool TRAJ_TRIAL_PLOT = true;  // fixed 18-channel trial page, including stopped states
-constexpr float TRAJ_YAW_KP = 3.0f;      // 1/s        角度误差 → 角速度给定
+constexpr bool TRAJ_TRIAL_PLOT = true;   // fixed 18-channel trial page, including stopped states
+constexpr float TRAJ_YAW_KP = 4.2f;      // 1/s        角度误差 → 角速度给定
 constexpr float TRAJ_YAW_VEL_FF = 1.0f;  // 轨迹角速度前馈系数（1.0 = 直接叠加）
 constexpr float TRAJ_YAW_RATE_LIM =
   9.0f;  // rad/s: full trajectory needs about 7.149 rad/s plus correction headroom
-constexpr float TRAJ_PITCH_LEAD_S = 0.0f;  // velocity feedforward replaces reference lead
+constexpr float TRAJ_PITCH_LEAD_S = 0.0f;    // velocity feedforward replaces reference lead
 constexpr bool TRAJ_ANCHOR_ON_ENTER = true;  // 上档瞬间把轨迹原点对齐到当前姿态（避免参考阶跃）
 constexpr float TRAJ_AMP_SCALE =
   1.0f;  // full trajectory amplitude; official 680 ms timing is unchanged
@@ -182,8 +186,8 @@ sp::PID yaw_pid(CONTROL_DT, 0.6f, 0.2f, 0.0f, YAW_MAX_TORQUE, YAW_MAX_TORQUE, 0.
 // 速度环：Ki 0.02→0.2（1 ms 周期下 0.02 等于没有积分）；max_iout 收到 = max_out，否则积分会 windup
 // Pitch: angle P -> velocity PI, in output-side rad/s and Nm.
 pitch_cascade::Controller pitch_controller;
-const pitch_cascade::Config pitch_config{6.0f, 0.15f, 0.3f, TRAJ_REF_SLEW,
-                                         PITCH_MAX_TORQUE, PITCH_OUT_SLEW};
+const pitch_cascade::Config pitch_config{
+  6.0f, 0.32f, 0.3f, TRAJ_REF_SLEW, PITCH_MAX_TORQUE, PITCH_OUT_SLEW};
 // Unverified physical sign: positive motor speed is assumed to mean positive joint pitch.
 constexpr float PITCH_RATE_FB_SIGN = 1.0f;
 static_assert(PITCH_OUT_SIGN == 1.0f || PITCH_OUT_SIGN == -1.0f, "Invalid pitch torque sign");
@@ -197,8 +201,8 @@ float yaw_sp_ = 0.0f;        // 偏航目标角速度 rad/s
 float yaw_out_ = 0.0f;       // 偏航控制量 V
 float pitch_rate_sp_ = 0.0f;
 float pitch_dt_ = CONTROL_DT;
-float pitch_out_ = 0.0f;     // 俯仰控制量 N·m(转矩模式)
-uint32_t guard_ms_ = 0;      // 姿态联锁：超限持续了多少个控制周期（1 ms/拍）
+float pitch_out_ = 0.0f;  // 俯仰控制量 N·m(转矩模式)
+uint32_t guard_ms_ = 0;   // 姿态联锁：超限持续了多少个控制周期（1 ms/拍）
 bool fold_active_ = false;
 // 无折叠指令时的"保持角"：上电拿到反馈后锁存一次，之后一直闭环顶住（不发 0 转矩，避免重力下垂）
 float fold_hold_rad_ = 0.0f;
@@ -248,12 +252,15 @@ bool yaw_zero_valid_ = false;
 // 相对上电零位的电机角（rad）
 float fold_angle()
 {
-  return motor_feedback.fold_zero_valid ?
-    (motor_feedback.fold_angle - motor_feedback.fold_zero) : motor_feedback.fold_angle;
+  return motor_feedback.fold_zero_valid ? (motor_feedback.fold_angle - motor_feedback.fold_zero)
+                                        : motor_feedback.fold_angle;
 }
 
-float yaw_angle() { return motor_feedback.yaw_zero_valid ?
-  (motor_feedback.yaw_angle - motor_feedback.yaw_zero) : motor_feedback.yaw_angle; }
+float yaw_angle()
+{
+  return motor_feedback.yaw_zero_valid ? (motor_feedback.yaw_angle - motor_feedback.yaw_zero)
+                                       : motor_feedback.yaw_angle;
+}
 
 // 摇杆死区 + 线性重映射(过零连续，满量程仍是 ±1)
 float stick(float v, float dz)
@@ -267,6 +274,7 @@ float stick(float v, float dz)
 // 到界后不许再往外走，并给一点回推
 void apply_yaw_soft_limit()
 {
+  if (!YAW_POSITION_LIMIT_ENABLE) return;
   if (!motor_feedback.yaw_zero_valid) return;
   const float e = yaw_angle();
   if (e > YAW_SOFT_MAX_RAD) {
@@ -328,8 +336,9 @@ float slew_toward(float cur, float goal, float step)
 // Apply the new pitch cascade; caller handles invalid inputs before fold output.
 bool update_pitch(float velocity_feedforward)
 {
-  const auto output = pitch_controller.step(pitch_config, {true, pitch_target_, pitch_fb_,
-    velocity_feedforward, PITCH_RATE_FB_SIGN * motor_feedback.pitch_speed, pitch_dt_});
+  const auto output = pitch_controller.step(
+    pitch_config, {true, pitch_target_, pitch_fb_, velocity_feedforward,
+                   PITCH_RATE_FB_SIGN * motor_feedback.pitch_speed, pitch_dt_});
   pitch_rate_sp_ = output.rate;
   trial_pitch_raw_ = output.raw_torque;
   if (output.rate_limited) trial_flags_ |= 32u;
@@ -376,19 +385,20 @@ bool rx_fresh(uint32_t stamp_ms, uint32_t now_ms)
 uint8_t gimbal_fault_code(uint32_t now_ms)
 {
   // 先判“有没有数据”：sw_r 的零值等于 DOWN，没数据时会被误判成“拨杆下档”
-  if (!remote.is_alive(now_ms)) return 2;                     // 2) 遥控器失联（DBus 没数据）
-  if (remote.sw_r == sp::DBusSwitchMode::DOWN) return 1;      // 1) 右拨杆下档
-  if (YAW_ENABLE && !rx_fresh(motor_feedback.yaw_stamp, now_ms)) return 3;  // 3) 偏航反馈丢（0x206 / ID 2）
-  if (!rx_fresh(motor_feedback.pitch_stamp, now_ms)) return 4;              // 4) 俯仰反馈丢（0x204 / ID 4）
+  if (!remote.is_alive(now_ms)) return 2;                 // 2) 遥控器失联（DBus 没数据）
+  if (remote.sw_r == sp::DBusSwitchMode::DOWN) return 1;  // 1) 右拨杆下档
+  if (YAW_ENABLE && !rx_fresh(motor_feedback.yaw_stamp, now_ms))
+    return 3;                                                   // 3) 偏航反馈丢（0x206 / ID 2）
+  if (!rx_fresh(motor_feedback.pitch_stamp, now_ms)) return 4;  // 4) 俯仰反馈丢（0x204 / ID 4）
   return 0;
 }
 
 void fill_plot()
 {
-  const auto score = score_session.observe({control_stamp_ms_,
-    traj_active_ && gimbal_fault_ == 0 && !TRAJ_DRYRUN && !TRAJ_PREVIEW,
-    gimbal_fault_ == 0 || gimbal_fault_ == 1, TRAJ_AMP_SCALE == 1.0f,
-    attitude.yaw, traj_ref_yaw_, attitude.pitch, traj_ref_pitch_ / PITCH_FB_SIGN});
+  const auto score = score_session.observe(
+    {control_stamp_ms_, traj_active_ && gimbal_fault_ == 0 && !TRAJ_DRYRUN && !TRAJ_PREVIEW,
+     gimbal_fault_ == 0 || gimbal_fault_ == 1, TRAJ_AMP_SCALE == 1.0f, attitude.yaw, traj_ref_yaw_,
+     attitude.pitch, traj_ref_pitch_ / PITCH_FB_SIGN});
   trajectory_score::latest = score;
   plot_ch[14] = score.yaw_ratio;
   plot_ch[15] = score.pitch_ratio;
@@ -507,8 +517,8 @@ extern "C" void gimbal_task()
   osDelay(STARTUP_WAIT_MS);  // 等电机自检与第一帧反馈
   // Evaluate the table once while outputs are still zero, never inside a 1 ms control step.
   const auto trial_envelope = trajectory_trial::inspect(
-    TRAJ_AMP_SCALE, 0.0f, 0.0f, TRAJ_PITCH_LEAD_S,
-    -100.0f, 100.0f, 100.0f, TRAJ_YAW_RATE_LIM, TRAJ_REF_SLEW);
+    TRAJ_AMP_SCALE, 0.0f, 0.0f, TRAJ_PITCH_LEAD_S, -100.0f, 100.0f, 100.0f, TRAJ_YAW_RATE_LIM,
+    TRAJ_REF_SLEW);
   attitude = imu_feedback_read();
   pitch_target_ =
     PITCH_FB_SIGN * attitude.pitch;  // 上电时把俯仰目标锁在当前角("仰为正"约定)，避免一上电就窜
@@ -519,8 +529,8 @@ extern "C" void gimbal_task()
     attitude = imu_feedback_read();
     taskENTER_CRITICAL();
     motor_feedback = {yaw_motor.angle, fold_motor.angle, yaw_motor.speed, pitch_motor.speed,
-      yaw_rx_ms_, pitch_rx_ms_, fold_rx_ms_, yaw_zero_rad_, fold_zero_rad_,
-      yaw_zero_valid_, fold_zero_valid_};
+                      yaw_rx_ms_,      pitch_rx_ms_,     fold_rx_ms_,     yaw_zero_rad_,
+                      fold_zero_rad_,  yaw_zero_valid_,  fold_zero_valid_};
     taskEXIT_CRITICAL();
     const uint32_t now_ms = osKernelSysTick();
     const uint32_t elapsed = have_control_stamp ? now_ms - control_stamp_ms_ : 1u;
@@ -542,12 +552,14 @@ extern "C" void gimbal_task()
       trial_elapsed_ms_ = 0;
       trial_pitch_raw_ = 0.0f;
     }
-    if (gimbal_fault_ == 0 &&
-        (!attitude.ready || uint32_t(now_ms - attitude.stamp_ms) > 25u ||
-         !std::isfinite(attitude.yaw) || !std::isfinite(attitude.pitch) ||
-         !std::isfinite(attitude.roll) || !std::isfinite(motor_feedback.yaw_angle) ||
-         !std::isfinite(motor_feedback.fold_angle) || !std::isfinite(motor_feedback.yaw_speed) ||
-         !std::isfinite(motor_feedback.pitch_speed))) gimbal_fault_ = 8;
+    if (
+      gimbal_fault_ == 0 &&
+      (!attitude.ready || uint32_t(now_ms - attitude.stamp_ms) > 25u ||
+       !std::isfinite(attitude.yaw) || !std::isfinite(attitude.pitch) ||
+       !std::isfinite(attitude.roll) || !std::isfinite(motor_feedback.yaw_angle) ||
+       !std::isfinite(motor_feedback.fold_angle) || !std::isfinite(motor_feedback.yaw_speed) ||
+       !std::isfinite(motor_feedback.pitch_speed)))
+      gimbal_fault_ = 8;
     if (gimbal_fault_ == 0 && pitch_dt_ > 0.02f) gimbal_fault_ = 9;
     if (trial_blocked_ && gimbal_fault_ == 0) gimbal_fault_ = trial_fault_;
     traj_active_ = false;
@@ -574,7 +586,8 @@ extern "C" void gimbal_task()
       // 4.4.8 触发：编译期开关打开 + 右拨杆上档（中档/上档才使能，下档在上面已失能）
       // 折叠不在展开位（掉了 / 没折回来）时不许进轨迹：否则上段倒下 + 轨迹纠偏会把结构扯坏
       const bool fold_deployed_ok = rx_fresh(motor_feedback.fold_stamp, now_ms) &&
-        ((!TRAJ_REQUIRE_FOLD_DEPLOY) || (fabsf(fold_angle() - FOLD_DEPLOY_RAD) < TRAJ_FOLD_TOL_RAD));
+                                    ((!TRAJ_REQUIRE_FOLD_DEPLOY) ||
+                                     (fabsf(fold_angle() - FOLD_DEPLOY_RAD) < TRAJ_FOLD_TOL_RAD));
       if (TRAJ_ENABLE && remote.sw_r == TRAJ_GEAR && !fold_deployed_ok) {
         trial_blocked_ = true;
         gimbal_fault_ = 7;
@@ -592,10 +605,11 @@ extern "C" void gimbal_task()
         // 位置环会立刻满转矩砸过去）。做法：把轨迹当作"相对当前姿态的偏移"，
         // 参考角 = 上档时的姿态 + TRAJ_AMP_SCALE · (轨迹角 - 轨迹起点角)，天然连续。
         if (!traj_started_) {
-          if (!trial_envelope.valid || !trajectory_trial::fits(
-                trial_envelope, pitch_fb_, yaw_angle(), PITCH_MIN_RAD,
-                PITCH_MAX_RAD, YAW_SOFT_MIN_RAD, YAW_SOFT_MAX_RAD,
-                PITCH_POSITION_LIMIT_ENABLE)) {
+          if (
+            !trial_envelope.valid || !trajectory_trial::fits(
+                                       trial_envelope, pitch_fb_, yaw_angle(), PITCH_MIN_RAD,
+                                       PITCH_MAX_RAD, YAW_SOFT_MIN_RAD, YAW_SOFT_MAX_RAD,
+                                       PITCH_POSITION_LIMIT_ENABLE, YAW_POSITION_LIMIT_ENABLE)) {
             trial_blocked_ = true;
             gimbal_fault_ = 6;
             trial_fault_ = 6;
@@ -641,10 +655,8 @@ extern "C" void gimbal_task()
         else {
           // 偏航：角度外环 P + 轨迹角速度前馈 → 角速度给定 → 原有速率环（复用同一套限幅）
           trial_yaw_rate_ = TRAJ_YAW_KP * trajectory_trial::yaw_error(yaw_ref, attitude.yaw) +
-            TRAJ_YAW_VEL_FF * TRAJ_AMP_SCALE * tp.yaw_vel;
-          yaw_sp_ = sp::limit_min_max(
-            trial_yaw_rate_,
-            -TRAJ_YAW_RATE_LIM, TRAJ_YAW_RATE_LIM);
+                            TRAJ_YAW_VEL_FF * TRAJ_AMP_SCALE * tp.yaw_vel;
+          yaw_sp_ = sp::limit_min_max(trial_yaw_rate_, -TRAJ_YAW_RATE_LIM, TRAJ_YAW_RATE_LIM);
           if (yaw_sp_ != trial_yaw_rate_) trial_flags_ |= 1u;
           apply_yaw_soft_limit();
           yaw_pid.calc(yaw_sp_, motor_feedback.yaw_speed);
@@ -657,13 +669,14 @@ extern "C" void gimbal_task()
           const float previous_target = pitch_target_;
           const float pitch_target_goal = pitch_limit_target(pitch_ref);
           if (pitch_target_goal != pitch_ref) trial_flags_ |= 2u;
-          pitch_target_ = slew_toward(previous_target, pitch_target_goal, TRAJ_REF_SLEW * pitch_dt_);
+          pitch_target_ =
+            slew_toward(previous_target, pitch_target_goal, TRAJ_REF_SLEW * pitch_dt_);
           const bool reference_slew = pitch_target_ != pitch_target_goal;
           if (reference_slew) trial_flags_ |= 4u;
           // Feed forward the same reference the angle loop actually follows.
-          const float rate_ff = (reference_slew || pitch_target_goal != pitch_ref) ?
-            (pitch_target_ - previous_target) / pitch_dt_ :
-            TRAJ_AMP_SCALE * tp.pitch_vel;
+          const float rate_ff = (reference_slew || pitch_target_goal != pitch_ref)
+                                  ? (pitch_target_ - previous_target) / pitch_dt_
+                                  : TRAJ_AMP_SCALE * tp.pitch_vel;
           if (!update_pitch(rate_ff)) {
             gimbal_fault_ = trial_fault_ = 9;
             trial_blocked_ = true;
@@ -692,7 +705,8 @@ extern "C" void gimbal_task()
         }
         const float previous_target = pitch_target_;
         const float pitch_target_new = previous_target + PITCH_SIGN *
-          stick(remote.ch_lv, STICK_DEADZONE) * PITCH_RATE_MAX * pitch_dt_;
+                                                           stick(remote.ch_lv, STICK_DEADZONE) *
+                                                           PITCH_RATE_MAX * pitch_dt_;
         pitch_target_ = pitch_limit_target(pitch_target_new);
         trial_flags_ = 0;
         if (pitch_target_ != pitch_target_new) trial_flags_ |= 2u;
