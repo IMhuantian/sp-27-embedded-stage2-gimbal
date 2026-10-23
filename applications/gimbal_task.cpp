@@ -90,7 +90,7 @@ constexpr float PITCH_MIN_RAD = PITCH_LIMIT_MIN_RAD;  // 俯仰机械下限
 constexpr float PITCH_MAX_RAD = PITCH_LIMIT_MAX_RAD;  // 俯仰机械上限
 constexpr float YAW_MAX_TORQUE = 0.6f;                // N·m：0.4 试过会62%时间顶上限、Yaw跑飞，回退到0.6（软化后的最佳）
 constexpr float PITCH_MAX_TORQUE =
-  0.7f;  // N·m：速度P提到0.40后实测峰值已顶满0.6，放宽到0.7给控制留余量；结构已刚性固定
+  0.8f;  // N·m：退回已验证值（0.9 未证明确有必要）
 constexpr float FOLD_MAX_TORQUE = 1.2f;  // 折叠 GM6020 上限（驱动层封顶 2.223 N·m）；事故后 2.2→1.2
 constexpr bool FOLD_TORQUE_PLOT = false;  // 5 号通道显折叠输出转矩 N·m（偏航未启用时调试用）
 constexpr bool YAW_SPEED_PLOT =
@@ -164,7 +164,12 @@ constexpr float TRAJ_YAW_RATE_LIM =
 constexpr float TRAJ_PITCH_LEAD_S = 0.0f;  // velocity feedforward replaces reference lead
 // 加速度前馈：转动惯量约 0.003 kg·m²（两轮拟合 0.0029~0.0030）。官方表的加速度每毫秒最多跳
 // 13.5 rad/s²，纯 PI 追不上这种台阶，按 J·alpha 直接补转矩；仍受 max_torque 与变化率限幅。
-constexpr float PITCH_ACC_FF = 0.003f;       // N·m / (rad/s²)
+constexpr float PITCH_ACC_FF = 0.0045f;      // N·m / (rad/s²)：0.003 是螺丝松动时拟合的，换螺丝后下行仍滞后3.2度(6.7ms)
+// 顶部助力：峰顶欠冲约2.5度，按"保持力矩/刚度"(0.16 N·m / 3.6)估算需要在行程顶部补约0.17 N·m。
+// 只在接近停止时生效（|参考速度|小），避免在下行高速段反向拖拽。
+constexpr float PITCH_TOP_FF_K = 0.010f;       // N·m / 度
+constexpr float PITCH_TOP_FF_START = 40.0f;    // 度：超过此角度开始助力
+constexpr float PITCH_TOP_FF_RATE_MAX = 1.5f;  // rad/s：参考速度超过此值不助力
 constexpr bool TRAJ_ANCHOR_ON_ENTER = true;  // 进档瞬间把轨迹原点对齐到当前姿态（避免参考阶跃）
 constexpr float TRAJ_AMP_SCALE =
   1.0f;  // full trajectory amplitude; official 680 ms timing is unchanged
@@ -189,7 +194,7 @@ sp::PID yaw_pid(CONTROL_DT, 0.6f, 0.2f, 0.0f, YAW_MAX_TORQUE, YAW_MAX_TORQUE, 0.
 // Pitch: angle P -> velocity PI, in output-side rad/s and Nm.
 pitch_cascade::Controller pitch_controller;
 const pitch_cascade::Config pitch_config{
-  6.0f, 0.40f, 0.3f, TRAJ_REF_SLEW, PITCH_MAX_TORQUE, PITCH_OUT_SLEW};  // 速度P 0.32->0.40：下行滞后2.8度时只发出0.19Nm
+  9.0f, 0.40f, 0.3f, TRAJ_REF_SLEW, PITCH_MAX_TORQUE, PITCH_OUT_SLEW};  // 角度P 12 试过但姿态不同无法判定，退回已验证的9
 // Unverified physical sign: positive motor speed is assumed to mean positive joint pitch.
 constexpr float PITCH_RATE_FB_SIGN = 1.0f;
 static_assert(PITCH_OUT_SIGN == 1.0f || PITCH_OUT_SIGN == -1.0f, "Invalid pitch torque sign");
@@ -266,7 +271,7 @@ float yaw_angle()
 
 // 诊断专用（不可用于比赛）：打开后偏航电机恒不出力，用来测量"Yaw 不转时 Pitch 能好多少"。
 // 评分仍按真实参考计算，所以 Yaw 那一半会掉到接近 0，总分只反映 Pitch 的水平。
-constexpr bool YAW_TORQUE_DISABLE_TEST = false;
+constexpr bool YAW_TORQUE_DISABLE_TEST = true;  // 临时：只测 Pitch 轴上限，测完必须改回 false
 
 void yaw_command(float torque)
 {
@@ -690,7 +695,11 @@ extern "C" void gimbal_task()
                                   ? (pitch_target_ - previous_target) / pitch_dt_
                                   : TRAJ_AMP_SCALE * tp.pitch_vel;
           // Inertia feedforward from the tabulated reference acceleration.
-          const float torque_ff = PITCH_ACC_FF * TRAJ_AMP_SCALE * tp.pitch_acc;
+          const float top_assist =
+            (std::fabs(tp.pitch_vel) < PITCH_TOP_FF_RATE_MAX)
+              ? PITCH_TOP_FF_K * std::fmax(0.0f, pitch_target_ - PITCH_TOP_FF_START)
+              : 0.0f;
+          const float torque_ff = PITCH_ACC_FF * TRAJ_AMP_SCALE * tp.pitch_acc + top_assist;
           if (!update_pitch(rate_ff, torque_ff)) {
             gimbal_fault_ = trial_fault_ = 9;
             trial_blocked_ = true;

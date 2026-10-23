@@ -37,6 +37,6 @@ extern "C" void plotter_task()
         snapshot[7], snapshot[8], snapshot[9], snapshot[10], snapshot[11], snapshot[12], snapshot[13],
         snapshot[14], snapshot[15], snapshot[16], snapshot[17]);
     }
-    osDelay(5);  // 200 Hz telemetry; control and score tasks remain at 1 kHz.
+    osDelay(10);  // 100 Hz telemetry：921600 下实测丢帧 5.5%，减半发送量；控制与评分仍是 1 kHz
   }
 }
