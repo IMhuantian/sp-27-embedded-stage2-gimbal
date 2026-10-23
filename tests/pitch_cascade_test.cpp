@@ -64,5 +64,32 @@ int main() {
   controller.reset(0.2f); i.target_angle = 0;
   out = controller.step(c, i);
   check(near(out.torque, 0.197f), "mode takeover starts from actual previous output with slew");
+  // Acceleration feedforward: reaches the actuator, but never bypasses its limits.
+  {
+    Controller ff;
+    Config cf; cf.position_kp = 0; cf.speed_kp = 0; cf.speed_ki = 0;
+    cf.max_rate = 10; cf.max_torque = 0.3f; cf.torque_slew = 1000;
+    Input fi{true, 0.0f, 0.0f, 0.0f, 0.0f, 0.001f, 0.1f};
+    out = ff.step(cf, fi);
+    check(out.valid && near(out.torque, 0.1f),
+          "torque feedforward reaches the actuator without loop gains");
+    check(near(out.raw_torque, 0.1f), "torque feedforward is reported in the raw request");
+    Controller ff_cap;
+    fi.torque_feedforward = 1.0f;
+    out = ff_cap.step(cf, fi);
+    check(out.torque_limited && near(out.torque, 0.3f),
+          "torque feedforward cannot exceed the torque cap");
+    Controller ff_slew;
+    fi.torque_feedforward = 0.1f; cf.max_torque = 10; cf.torque_slew = 0.01f;
+    out = ff_slew.step(cf, fi);
+    check(out.slew_limited && near(out.torque, 0.00001f),
+          "torque feedforward obeys the output slew limit");
+    fi.torque_feedforward = std::numeric_limits<float>::quiet_NaN();
+    check(!ff_slew.step(cf, fi).valid, "nonfinite torque feedforward fails closed");
+    Controller ff_off;
+    fi.torque_feedforward = 0.0f; cf.torque_slew = 1000; cf.max_torque = 0.3f;
+    out = ff_off.step(cf, fi);
+    check(near(out.torque, 0.0f), "zero feedforward leaves the old behaviour unchanged");
+  }
   std::puts("PASS: pitch cascade public behavior, feedforward, limits, antiwindup, disable, validity");
 }

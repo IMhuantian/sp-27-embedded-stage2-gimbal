@@ -163,6 +163,9 @@ constexpr float TRAJ_YAW_VEL_FF = 1.0f;  // 轨迹角速度前馈系数（1.0 = 
 constexpr float TRAJ_YAW_RATE_LIM =
   9.0f;  // rad/s: full trajectory needs about 7.149 rad/s plus correction headroom
 constexpr float TRAJ_PITCH_LEAD_S = 0.0f;    // velocity feedforward replaces reference lead
+// 加速度前馈：转动惯量约 0.003 kg·m²（两轮拟合 0.0029~0.0030）。官方表的加速度每毫秒最多跳
+// 13.5 rad/s²，纯 PI 追不上这种台阶，按 J·alpha 直接补转矩；仍受 max_torque 与变化率限幅。
+constexpr float PITCH_ACC_FF = 0.003f;  // N·m / (rad/s²)
 constexpr bool TRAJ_ANCHOR_ON_ENTER = true;  // 上档瞬间把轨迹原点对齐到当前姿态（避免参考阶跃）
 constexpr float TRAJ_AMP_SCALE =
   1.0f;  // full trajectory amplitude; official 680 ms timing is unchanged
@@ -334,11 +337,11 @@ float slew_toward(float cur, float goal, float step)
 }
 
 // Apply the new pitch cascade; caller handles invalid inputs before fold output.
-bool update_pitch(float velocity_feedforward)
+bool update_pitch(float velocity_feedforward, float torque_feedforward)
 {
   const auto output = pitch_controller.step(
     pitch_config, {true, pitch_target_, pitch_fb_, velocity_feedforward,
-                   PITCH_RATE_FB_SIGN * motor_feedback.pitch_speed, pitch_dt_});
+                   PITCH_RATE_FB_SIGN * motor_feedback.pitch_speed, pitch_dt_, torque_feedforward});
   pitch_rate_sp_ = output.rate;
   trial_pitch_raw_ = output.raw_torque;
   if (output.rate_limited) trial_flags_ |= 32u;
@@ -677,7 +680,9 @@ extern "C" void gimbal_task()
           const float rate_ff = (reference_slew || pitch_target_goal != pitch_ref)
                                   ? (pitch_target_ - previous_target) / pitch_dt_
                                   : TRAJ_AMP_SCALE * tp.pitch_vel;
-          if (!update_pitch(rate_ff)) {
+          // Inertia feedforward from the tabulated reference acceleration.
+          const float torque_ff = PITCH_ACC_FF * TRAJ_AMP_SCALE * tp.pitch_acc;
+          if (!update_pitch(rate_ff, torque_ff)) {
             gimbal_fault_ = trial_fault_ = 9;
             trial_blocked_ = true;
             disable_all();
@@ -710,7 +715,7 @@ extern "C" void gimbal_task()
         pitch_target_ = pitch_limit_target(pitch_target_new);
         trial_flags_ = 0;
         if (pitch_target_ != pitch_target_new) trial_flags_ |= 2u;
-        if (!update_pitch((pitch_target_ - previous_target) / pitch_dt_)) {
+        if (!update_pitch((pitch_target_ - previous_target) / pitch_dt_, 0.0f)) {
           gimbal_fault_ = trial_fault_ = 9;
           trial_blocked_ = true;
           disable_all();

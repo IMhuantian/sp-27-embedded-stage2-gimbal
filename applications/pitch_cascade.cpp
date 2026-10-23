@@ -21,6 +21,7 @@ Output Controller::step(const Config& c, const Input& i) {
       !finite(c.torque_slew) || c.torque_slew <= 0.0f ||
       !finite(i.target_angle) || !finite(i.actual_angle) ||
       !finite(i.velocity_feedforward) || !finite(i.measured_rate) ||
+      !finite(i.torque_feedforward) ||
       !finite(i.dt) || i.dt <= 0.0f || i.dt > 0.02f) {
     reset(); out.valid = false; return out;
   }
@@ -33,7 +34,9 @@ Output Controller::step(const Config& c, const Input& i) {
   const float proportional = c.speed_kp * error;
   const float candidate = clamp(integral_ + c.speed_ki * error * i.dt,
                                 -c.max_torque, c.max_torque);
-  const float raw = proportional + candidate;
+  // Feedforward torque (inertia compensation) is added here, inside the actuator
+  // limits, so it can never bypass the torque cap or the output slew rate.
+  const float raw = proportional + candidate + i.torque_feedforward;
   if (!finite(error) || !finite(proportional) || !finite(raw)) {
     reset(); out.valid = false; return out;
   }
@@ -43,7 +46,7 @@ Output Controller::step(const Config& c, const Input& i) {
   const float proposed = clamp(clamp(raw, -c.max_torque, c.max_torque),
                                output_ - max_step, output_ + max_step);
   if ((raw - proposed) * error <= 0.0f) integral_ = candidate;
-  out.raw_torque = proportional + integral_;
+  out.raw_torque = proportional + integral_ + i.torque_feedforward;
   const float limited = clamp(out.raw_torque, -c.max_torque, c.max_torque);
   out.torque_limited = limited != out.raw_torque;
   out.torque = clamp(limited, output_ - max_step, output_ + max_step);

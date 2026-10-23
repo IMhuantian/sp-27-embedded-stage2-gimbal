@@ -17,6 +17,8 @@ struct Input {
   float target_angle, actual_angle;
   float velocity_feedforward, measured_rate;
   float dt;
+  // 直接叠加到转矩上的前馈（惯量补偿 J·alpha）；默认 0 时行为与旧版完全一致。
+  float torque_feedforward = 0.0f;
 };
 struct Output {
   float rate = 0.0f, raw_torque = 0.0f, torque = 0.0f;
