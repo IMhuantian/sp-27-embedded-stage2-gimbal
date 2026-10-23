@@ -5,13 +5,19 @@
 
 namespace sp
 {
+// 帧格式：AA BB <size=72> <18×float> <校验1字节>，共 76 字节。
+// SerialPlot 的 CustomFrame 勾选 checksum 后，最后 1 字节按累加和校验，坏帧会被丢弃并重新同步，
+// 不会再画出 8e35 这种错位解出来的尖峰。
 constexpr size_t PLOTTER_FLOAT_NUM = 18;
+// 校验覆盖范围：true = 含 size 字节（从 size 到数据末尾）；false = 只算 72 字节数据。
+constexpr bool PLOTTER_CHECKSUM_INCLUDE_SIZE = true;
 
 struct __attribute__((packed)) PlotFrame
 {
   uint8_t start[2] = {0xAA, 0xBB};
   uint8_t size;
   float data[PLOTTER_FLOAT_NUM];
+  uint8_t checksum = 0;
 };
 
 class Plotter
@@ -75,6 +81,7 @@ private:
   PlotFrame plot_frame_;
 
   void send();
+  void update_checksum();
 };
 
 }  // namespace sp

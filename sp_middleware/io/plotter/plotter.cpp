@@ -7,6 +7,20 @@ Plotter::Plotter(UART_HandleTypeDef * huart, bool use_dma)
 {
 }
 
+// 加法校验：SerialPlot 收到后逐字节求和比对，不一致就丢帧并重新同步。
+// 覆盖 size 字节 + 有效数据字节（不含帧头 AA BB 与校验字节本身）。
+void Plotter::update_checksum()
+{
+  const uint8_t * first = PLOTTER_CHECKSUM_INCLUDE_SIZE
+                            ? reinterpret_cast<const uint8_t *>(&plot_frame_.size)
+                            : reinterpret_cast<const uint8_t *>(plot_frame_.data);
+  const uint8_t * last =
+    reinterpret_cast<const uint8_t *>(plot_frame_.data) + plot_frame_.size;
+  uint8_t sum = 0;
+  for (const uint8_t * p = first; p < last; ++p) sum = static_cast<uint8_t>(sum + *p);
+  plot_frame_.checksum = sum;
+}
+
 void Plotter::plot(float value1)
 {
   static_assert(PLOTTER_FLOAT_NUM >= 1);
@@ -335,15 +349,14 @@ void Plotter::plot(
 
 void Plotter::send()
 {
+  update_checksum();
+  const uint16_t length = sizeof(plot_frame_.start) + sizeof(plot_frame_.size) +
+                          plot_frame_.size + sizeof(plot_frame_.checksum);
   if (use_dma_) {
-    hal_status_ = HAL_UART_Transmit_DMA(
-      huart_, (uint8_t *)&plot_frame_,
-      sizeof(plot_frame_.start) + sizeof(plot_frame_.size) + plot_frame_.size);
+    hal_status_ = HAL_UART_Transmit_DMA(huart_, (uint8_t *)&plot_frame_, length);
   }
   else {
-    hal_status_ = HAL_UART_Transmit(
-      huart_, (uint8_t *)&plot_frame_,
-      sizeof(plot_frame_.start) + sizeof(plot_frame_.size) + plot_frame_.size, 0xff);
+    hal_status_ = HAL_UART_Transmit(huart_, (uint8_t *)&plot_frame_, length, 0xff);
   }
 }
 

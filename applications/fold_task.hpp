@@ -9,11 +9,10 @@
 //   - 用测距结果 + 阈值/回差 + 状态判断，避免在阈值附近频繁切换；
 //   - 有限位 / 超时 / 异常退出保护。
 //
-// 本轮状态（2026-10-14，云台机构与折叠电机尚未接线）：
-//   FOLD_ENABLE = false → fold_update() 只把状态机停在 IDLE，不给任何电机指令；
-//   gimbal_task.cpp 因此始终给折叠电机 0（并清掉位置环积分）。
-//   接线后要做的事见 README「4.4.7 待做」：量 FOLD_STOW_RAD / FOLD_DEPLOY_RAD、
-//   接限位开关、按隧道实测整定 FOLD_TRIGGER_CM / FOLD_RELEASE_CM、把 FOLD_ENABLE 改成 true。
+// 当前状态（2026-10-23）：机构与折叠电机已接线，FOLD_ENABLE = true，按测距自动收/展：
+//   收折：距离读到 ≤ FOLD_TRIGGER_CM(80 cm)；
+//   展开：折叠完成并保持 FOLD_MIN_HOLD_MS(3 s) 后，距离 > FOLD_RELEASE_CM(100 cm)。
+//   动作到位仍按时间判（见 fold_task.cpp），限位开关未接。
 
 constexpr bool FOLD_ENABLE = true;
 
@@ -27,18 +26,21 @@ constexpr uint32_t FOLD_MOVE_TIME_MS = 2200u;
 // 触发余量：去抖 300 ms + 采样/刹停余量
 constexpr float FOLD_TRIGGER_MARGIN_CM = 25.0f;
 // 触发距离 = 车速 × 动作时间 + 余量，保证折叠在进隧道口之前做完（0.6×1.4×100+25 ≈ 109 cm）
-// 触发距离按用户定稿固定 80 cm（原公式 车速×动作时间+余量 会算出 109 cm）。
+// 触发距离按用户定稿固定 80 cm（原公式 车速×动作时间+余量 会算出 109 cm）；
+// 判据是 "≤ 80 cm"：GY-56 读数是整数 cm，用 "<" 会漏掉正好读到 80 的那一格。
 // 校核见下面的 static_assert：0.8 m 在 CHASSIS_SPEED_MPS 下必须够折完。
 constexpr float FOLD_TRIGGER_CM = 80.0f;
-// 展开阈值：比触发阈值大（回差），又不能超过 GY-56 量程 120 cm
-constexpr float FOLD_RELEASE_CM = 115.0f;
-// 收折后至少保持这么久再允许展开（隧道长度 / 车速：3 s ≈ 1.8 m @0.6 m/s）
+// 展开阈值：前方物体 > 1 m（100 cm）即复原；必须大于触发阈值（回差），且小于 GY-56 量程 120 cm
+constexpr float FOLD_RELEASE_CM = 100.0f;
+// 折叠完成后至少保持这么久才允许展开（3 s：折完先停稳再判；0.5 s 时实测会显得"折完马上复原"）
 constexpr uint32_t FOLD_MIN_HOLD_MS = 3000u;
 constexpr uint32_t FOLD_DEBOUNCE_MS = 300;       // 条件连续满足这么久才切状态
 constexpr uint32_t FOLD_MOVE_TIMEOUT_MS = 3000;  // 动作超时 → FAULT 并停机
 static_assert(
   FOLD_TRIGGER_CM < 120.0f, "触发距离超出 GY-56 量程 120cm：折叠来不及做完，加大折叠速度");
 static_assert(FOLD_RELEASE_CM > FOLD_TRIGGER_CM, "释放阈值必须大于触发阈值（回差）");
+static_assert(
+  FOLD_RELEASE_CM < 120.0f, "展开阈值超出 GY-56 量程 120cm：读不到有效距离，只能靠超量程判据展开");
 static_assert(FOLD_TRIGGER_CM / (CHASSIS_SPEED_MPS * 100.0f) >= FOLD_MOVE_TIME_S,
               "80 cm 在 CHASSIS_SPEED_MPS 下不够折完：要么降车速，要么提高折叠速度/提前触发");
 // ---- 折叠几何（2026/10/21 现场确认；2026/10/22 重新定义：上电 = 展开）----
