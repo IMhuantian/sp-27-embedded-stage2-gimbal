@@ -63,13 +63,13 @@ void fold_update(uint32_t now_ms)
   const bool dist_ok = tof_get_distance(&dist_cm, now_ms);
 
   // ---- 2) 条件 + 回差 + 去抖（避免阈值附近频繁切换）----
-  //     收折：距离有效且 < 触发阈值；
-  //     展开：距离 > 释放阈值，或“前方已经没有东西”（超量程/无效读数）；
+  //     收折：距离有效且 ≤ 触发阈值（读到 80 cm 就开始折）；
+  //     展开：距离 > 释放阈值（1 m），或“前方已经没有东西”（超量程/无效读数）；
   //     通信异常（无帧/超时/帧错）时保持当前状态，不因为"看不见"就乱动机构。
   const bool far = dist_ok ? (dist_cm > FOLD_RELEASE_CM) : (tof_status == TOF_STATUS_RANGE);
   const bool cond = (state_ == FoldState::FOLDED || state_ == FoldState::UNFOLDING)
                       ? far
-                      : (dist_ok && dist_cm < FOLD_TRIGGER_CM);
+                      : (dist_ok && dist_cm <= FOLD_TRIGGER_CM);
   if (cond != cond_last_) {
     cond_last_ = cond;
     cond_since_ = now_ms;
@@ -103,7 +103,7 @@ void fold_update(uint32_t now_ms)
       break;
 
     case FoldState::FOLDED:
-      // 收折后至少保持 FOLD_MIN_HOLD_MS（≈隧道长度 / 车速），再允许展开
+      // 折完先停稳 FOLD_MIN_HOLD_MS（0.5 s，避开收折规划最后一段），再看前方是否 > 1 m
       if (cond_stable && (now_ms - folded_since_ >= FOLD_MIN_HOLD_MS)) {
         state_ = FoldState::UNFOLDING;
         has_target_ = true;
