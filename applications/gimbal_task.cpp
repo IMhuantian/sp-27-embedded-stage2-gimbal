@@ -127,7 +127,7 @@ constexpr float FOLD_SPEED_GAIN = 4.0f;  // 1/s：接近目标时按这个增益
 // ---- 使能瞬间的柔和处理（避免切档时猛拉/猛冲）----
 // 失能期间机构会被重力放下来；重新使能时若还按“上电时的设定角”闭环，误差很大 → 第一拍就满转矩。
 // 做法：使能第一拍把设定角/规划点“就地接管”成当前实际角，再加上出力变化率限制。
-constexpr float PITCH_OUT_SLEW = 50.0f;   // N·m/s：俯仰出力变化率上限；±0.3 N·m 反向切换约 37.5 ms
+constexpr float PITCH_OUT_SLEW = 50.0f;   // N·m/s：俯仰出力变化率上限（80 试过：谷底只改善0.4度，整体更差，已回退）
 constexpr float FOLD_TORQUE_SLEW = 8.0f;  // N·m/s：折叠出力变化率上限（8 → 1.2 N·m 约 150 ms）
 constexpr float YAW_OUT_SLEW = 80.0f;     // N·m/s：实测31.7%时间贴50上限而转矩只用0.86→提到80降低指令滞后
 constexpr float STICK_DEADZONE = 0.02f;
