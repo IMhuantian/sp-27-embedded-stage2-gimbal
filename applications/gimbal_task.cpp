@@ -9,7 +9,8 @@
  * 遥控映射(云台侧；本板自己读 DT7，与底盘 C 板互不转发)：
  *   右拨杆下档 → 云台全部电机失能(最高优先级)
  *   右拨杆中档 → 4.4.8 目标轨迹跟踪（TRAJ_GEAR = MID；要求折叠已在展开位）
- *   右拨杆上档 → 手动 + 按测距自动折叠(4.4.7)：右摇杆偏航 / 左摇杆俯仰
+ *   右拨杆上档 → 手动 + 按测距自动折叠(4.4.7)：右摇杆偏航 / 左摇杆俯仰；
+ *                完成一次"折叠+复原"后再等 15 s，自动开始 4.4.8 轨迹跟踪
  *   左摇杆左右 / 拨轮 → 暂未分配
  *
  * 安全：
@@ -90,7 +91,7 @@ constexpr float PITCH_MIN_RAD = PITCH_LIMIT_MIN_RAD;  // 俯仰机械下限
 constexpr float PITCH_MAX_RAD = PITCH_LIMIT_MAX_RAD;  // 俯仰机械上限
 constexpr float YAW_MAX_TORQUE = 0.6f;                // N·m：0.4 试过会62%时间顶上限、Yaw跑飞，回退到0.6（软化后的最佳）
 constexpr float PITCH_MAX_TORQUE =
-  0.7f;  // N·m：速度P提到0.40后实测峰值已顶满0.6，放宽到0.7给控制留余量；结构已刚性固定
+  0.8f;  // N·m：参数1 实测 0.773/16.38 的最优档
 constexpr float FOLD_MAX_TORQUE = 1.2f;  // 折叠 GM6020 上限（驱动层封顶 2.223 N·m）；事故后 2.2→1.2
 constexpr bool FOLD_TORQUE_PLOT = false;  // 5 号通道显折叠输出转矩 N·m（偏航未启用时调试用）
 constexpr bool YAW_SPEED_PLOT =
@@ -115,12 +116,12 @@ constexpr float TRAJ_FOLD_TOL_RAD = 0.0872665f;
 constexpr float FOLD_GRAVITY_FF_NM = 0.0f;
 constexpr float FOLD_FF_SIGN = 1.0f;
 // 折叠速度规划：不给目标角阶跃，而是让目标角按限速/限加速度爬过去
-// 0.8 rad/s = 46 deg/s；80 deg（1.396 rad）的行程约 1.8 s 走完。还是太快就把 FOLD_SPEED_MAX 调小。
+// 1.5 rad/s = 86 deg/s；80 deg（1.396 rad）的行程约 1.4 s 走完。还是太快就把 FOLD_SPEED_MAX 调小。
 // 中档现在 = 轨迹档（轨迹期间折叠本来就锁在展开位），这个旧开关保留 false、不要打开：
 // 打开只会在中档重复给"展开"目标；台架想强制收/展请用 FOLD_CMD。
 constexpr bool FOLD_MID_DEPLOY = false;
-constexpr float FOLD_SPEED_MAX = 0.8f;   // rad/s：折叠目标角变化率上限（事故后 1.2→0.8，约 46 °/s）
-constexpr float FOLD_ACC_MAX = 1.5f;     // rad/s²：折叠目标角加速度上限（事故后 3.0→1.5）
+constexpr float FOLD_SPEED_MAX = 1.5f;   // rad/s：折叠目标角变化率上限（2026-10-24 第二次机会：1.0→1.5）
+constexpr float FOLD_ACC_MAX = 3.0f;     // rad/s²：折叠目标角加速度上限（2026-10-24 第二次机会：2.0→3.0）
 constexpr float FOLD_SPEED_GAIN = 4.0f;  // 1/s：接近目标时按这个增益减速
 // 折叠轴软限位：以上电锁存角为中心，顺/逆时针各 60°（机械限位由这一层兜住）
 // 折叠软限位窗口由 fold_task.hpp 的 FOLD_LIMIT_LO_RAD / FOLD_LIMIT_HI_RAD 给出（相对上电零位）
@@ -164,7 +165,12 @@ constexpr float TRAJ_YAW_RATE_LIM =
 constexpr float TRAJ_PITCH_LEAD_S = 0.0f;  // velocity feedforward replaces reference lead
 // 加速度前馈：转动惯量约 0.003 kg·m²（两轮拟合 0.0029~0.0030）。官方表的加速度每毫秒最多跳
 // 13.5 rad/s²，纯 PI 追不上这种台阶，按 J·alpha 直接补转矩；仍受 max_torque 与变化率限幅。
-constexpr float PITCH_ACC_FF = 0.003f;       // N·m / (rad/s²)
+constexpr float PITCH_ACC_FF = 0.0045f;      // N·m / (rad/s²)：0.003->0.0045 实测下行滞后 3.17->1.43 度、MAE 1.22->0.82
+// 顶部助力：峰顶欠冲约 2.0~2.5 度，按"保持力矩/刚度"(约0.17 N·m / 3.6)估算，在行程顶部补 0.17 N·m。
+// 仅在接近停止时生效（|参考速度| < 1.5），不影响下行高速段。
+constexpr float PITCH_TOP_FF_K = 0.010f;       // N·m / 度
+constexpr float PITCH_TOP_FF_START = 40.0f;    // 度
+constexpr float PITCH_TOP_FF_RATE_MAX = 1.5f;  // rad/s
 constexpr bool TRAJ_ANCHOR_ON_ENTER = true;  // 进档瞬间把轨迹原点对齐到当前姿态（避免参考阶跃）
 constexpr float TRAJ_AMP_SCALE =
   1.0f;  // full trajectory amplitude; official 680 ms timing is unchanged
@@ -172,6 +178,9 @@ constexpr float TRAJ_REF_SLEW =
   11.0f;  // rad/s: pitch reference slew and cascade rate cap; full peak is 8.308
 constexpr sp::DBusSwitchMode TRAJ_GEAR =
   sp::DBusSwitchMode::MID;  // 轨迹挂在哪个档（MID=中档；上档留给手动+测距折叠）
+// 上档自动轨迹：完成一次"折叠+复原"（回到展开位）后，再等这么久自动进入 4.4.8。
+// 中档仍然是"拨到就开始"，不受这个延时影响；没折过（没完成过一轮）就永远不自动开始。
+constexpr uint32_t TRAJ_AUTO_DELAY_MS = 15000u;
 
 // ---- 电机与总线 ----------------------------------------------------------
 // 两条总线：偏航在 CAN2，折叠与俯仰在 CAN1（队友 2026-10-19 实测接线）
@@ -189,7 +198,7 @@ sp::PID yaw_pid(CONTROL_DT, 0.6f, 0.2f, 0.0f, YAW_MAX_TORQUE, YAW_MAX_TORQUE, 0.
 // Pitch: angle P -> velocity PI, in output-side rad/s and Nm.
 pitch_cascade::Controller pitch_controller;
 const pitch_cascade::Config pitch_config{
-  6.0f, 0.40f, 0.3f, TRAJ_REF_SLEW, PITCH_MAX_TORQUE, PITCH_OUT_SLEW};  // 速度P 0.32->0.40：下行滞后2.8度时只发出0.19Nm
+  9.0f, 0.40f, 0.3f, TRAJ_REF_SLEW, PITCH_MAX_TORQUE, PITCH_OUT_SLEW};  // 角度P 6->9：参数1 实测 0.773/16.38 的最优档
 // Unverified physical sign: positive motor speed is assumed to mean positive joint pitch.
 constexpr float PITCH_RATE_FB_SIGN = 1.0f;
 static_assert(PITCH_OUT_SIGN == 1.0f || PITCH_OUT_SIGN == -1.0f, "Invalid pitch torque sign");
@@ -221,7 +230,10 @@ bool fold_resync_ = true;
 // 4.4.8 轨迹状态：从 disable_all 之后重新开始，相位起点记 traj_start_ms_
 uint32_t traj_start_ms_ = 0;
 bool traj_started_ = false;
-bool traj_active_ = false;  // 本周期是否真在轨迹模式（TRAJ_ENABLE && 右拨杆在 TRAJ_GEAR），波形据此换参考量
+bool traj_active_ = false;  // 本周期是否真在轨迹模式（TRAJ_ENABLE && 轨迹档，含上档自动），波形据此换参考量
+// 上档自动轨迹：折叠+复原完成时刻 → 满 15 s 后在上档自动接管（只认第一次完成）
+bool traj_auto_armed_ = false;
+uint32_t traj_auto_done_ms_ = 0;
 float traj_ref_yaw_ = 0.0f;  // 本周期轨迹给定角 rad（只给波形看）
 float traj_ref_pitch_ = 0.0f;
 // 进档瞬间的基准：把轨迹映射成"从当前姿态出发、幅度缩放后的相对运动"
@@ -576,6 +588,18 @@ extern "C" void gimbal_task()
     if (trial_blocked_ && gimbal_fault_ == 0) gimbal_fault_ = trial_fault_;
     traj_active_ = false;
 
+    // ---- 上档自动轨迹：完成一次"折叠+复原"（回到展开位）后开始 15 s 倒计时 ----
+    // 只认第一次完成；上电复位后重新计。没折过就一直不自动开始。
+    if (!traj_auto_armed_ && fold_cycle_finished()) {
+      traj_auto_armed_ = true;
+      traj_auto_done_ms_ = now_ms;
+    }
+    const bool traj_auto_ready =
+      traj_auto_armed_ && (now_ms - traj_auto_done_ms_) >= TRAJ_AUTO_DELAY_MS;
+    // 轨迹档：中档（TRAJ_GEAR）随时可以开始；上档要等自动倒计时到点
+    const bool traj_gear_on =
+      (remote.sw_r == TRAJ_GEAR) || (traj_auto_ready && remote.sw_r == sp::DBusSwitchMode::UP);
+
     // ---- 姿态联锁（事故后加）：横滚超限 / 跟随精度崩了且已在出力 → 判机构异常，撒手 ----
     if (
       ATTITUDE_GUARD_ENABLE &&
@@ -588,19 +612,19 @@ extern "C" void gimbal_task()
     }
     if (gimbal_fault_ == 0 && guard_ms_ >= GUARD_TRIP_MS) gimbal_fault_ = 5;  // 5 = 姿态/跟随异常
     if (gimbal_fault_ != 0) {
-      if (gimbal_fault_ != 1 && remote.sw_r == TRAJ_GEAR && !trial_blocked_) {
+      if (gimbal_fault_ != 1 && traj_gear_on && !trial_blocked_) {
         trial_blocked_ = true;
         trial_fault_ = gimbal_fault_;
       }
       disable_all();  // 三层失能：任一原因都整机断力
     }
     else {
-      // 4.4.8 触发：编译期开关打开 + 右拨杆打到 TRAJ_GEAR（默认中档；下档在上面已失能）
+      // 4.4.8 触发：编译期开关打开 + 拨到 TRAJ_GEAR（中档）或上档且自动倒计时已到点
       // 折叠不在展开位（掉了 / 没折回来）时不许进轨迹：否则上段倒下 + 轨迹纠偏会把结构扯坏
       const bool fold_deployed_ok = rx_fresh(motor_feedback.fold_stamp, now_ms) &&
                                     ((!TRAJ_REQUIRE_FOLD_DEPLOY) ||
                                      (fabsf(fold_angle() - FOLD_DEPLOY_RAD) < TRAJ_FOLD_TOL_RAD));
-      if (TRAJ_ENABLE && remote.sw_r == TRAJ_GEAR && !fold_deployed_ok) {
+      if (TRAJ_ENABLE && traj_gear_on && !fold_deployed_ok) {
         trial_blocked_ = true;
         gimbal_fault_ = 7;
         trial_fault_ = 7;
@@ -609,7 +633,7 @@ extern "C" void gimbal_task()
         vTaskDelayUntil(&wake, pdMS_TO_TICKS(1));
         continue;
       }
-      const bool traj_mode = TRAJ_ENABLE && (remote.sw_r == TRAJ_GEAR) && fold_deployed_ok;
+      const bool traj_mode = TRAJ_ENABLE && traj_gear_on && fold_deployed_ok;
       traj_active_ = traj_mode;
       if (traj_mode) {
         // ---- 4.4.8：按组委会轨迹曲线跟踪 ----
@@ -690,7 +714,11 @@ extern "C" void gimbal_task()
                                   ? (pitch_target_ - previous_target) / pitch_dt_
                                   : TRAJ_AMP_SCALE * tp.pitch_vel;
           // Inertia feedforward from the tabulated reference acceleration.
-          const float torque_ff = PITCH_ACC_FF * TRAJ_AMP_SCALE * tp.pitch_acc;
+          const float top_assist =
+            (std::fabs(tp.pitch_vel) < PITCH_TOP_FF_RATE_MAX)
+              ? PITCH_TOP_FF_K * std::fmax(0.0f, pitch_target_ - PITCH_TOP_FF_START)
+              : 0.0f;
+          const float torque_ff = PITCH_ACC_FF * TRAJ_AMP_SCALE * tp.pitch_acc + top_assist;
           if (!update_pitch(rate_ff, torque_ff)) {
             gimbal_fault_ = trial_fault_ = 9;
             trial_blocked_ = true;

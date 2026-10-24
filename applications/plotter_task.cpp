@@ -1,42 +1,47 @@
 #include "cmsis_os.h"
-#include "io/plotter/plotter.hpp"
+#include "usart.h"
+#include "tof_task.hpp"
+#include "trajectory_score.hpp"
 
-// 波形走 USART1（丝印 UART2）921600，上位机用 SerialPlot。
-// Current fixed page is documented in docs/TRAJECTORY_SCORE.md (18 channels).
-// 一帧 = AA BB + size + N 个 float，size = 18 x 4 = 0x48，共 75 字节；14..17为评分通道。
-// huart1 上只能挂一个 Plotter，两个任务同时发帧会交错成乱码。
-//
-// 通道（云台 C 板；4.4.2.1 要求"测距结果可通过调试输出验证"）：
-//   0  测距(3 点中值后) cm        ← -1 = 无效(超时 / 帧错 / 无效值 / 超量程)
-//   1  测距状态码 0 正常 / 1 无帧 / 2 超时 / 3 帧错 / 4 无效值或超量程
-//   2/3/4  IMU yaw / pitch / roll rad
-//   5  偏航目标角速度 rad/s        6  偏航实际角速度 rad/s      7  偏航控制量 V
-//   8  俯仰目标角 rad              9  俯仰实际角(IMU) rad      10 俯仰控制量 V
-//   11 折叠状态码 0 IDLE / 1 FOLDING / 2 FOLDED / 3 UNFOLDING / 4 FAULT
-//   12 折叠电机目标角 rad          13 折叠电机是否被驱动(0/1)
-// (规则书 4.4.2.2 要求的"目标值 / 反馈值 / 控制量"三件套对应 5-10 通道)
-extern float plot_ch[18];  // 定义在 applications/gimbal_task.cpp
+// USART1（丝印UART2）：460800 8N1，100 Hz；控制和评分仍为1 kHz。
+// 7通道：Yaw比例、Pitch比例、Yaw目标/实际(度)、Pitch目标/实际(度)、测距(cm)。
+// 内部18通道诊断保留，串口只发送下面7项；参见docs/TELEMETRY_7CH.md。
+extern float plot_ch[18];
 
-sp::Plotter plotter(&huart1);
+namespace {
+constexpr float RAD_TO_DEG = 57.29577951308232f;
+struct __attribute__((packed)) TelemetryFrame {
+  uint8_t start[2] = {0xAA, 0xBB};
+  uint8_t size = 7u * sizeof(float);
+  float values[7] = {};
+  uint8_t checksum = 0;
+};
+static_assert(sizeof(TelemetryFrame) == 32u, "Seven-channel wire frame must be 32 bytes");
+TelemetryFrame frame;
+}
 
 extern "C" void plotter_task()
 {
   while (true) {
-    // ⚠️ 必须确认上一帧已经发完(UART 回到 READY)再填下一帧：
-    // Plotter 内部只有一份 plot_frame_ 缓冲，而发送走 DMA —— 在 DMA 还在读这块内存时改写，
-    // SerialPlot 上就会出现错位帧 / 花帧(库里的 send() 只是把 BUSY 记进 hal_status_)。
-    // huart1.gState 由 HAL 在 DMA 发送完成中断里恢复成 HAL_UART_STATE_READY。
-    // 一帧 = 75 B @921600 ≈ 0.814 ms，正常 1 ms 周期够用；万一上一帧还没发完，本帧直接丢弃(不补发)。
+    // DMA读取期间不改帧；32字节在460800下约0.694 ms。
     if (huart1.gState == HAL_UART_STATE_READY) {
-      float snapshot[18];
       taskENTER_CRITICAL();
-      for (unsigned i = 0; i < 18; ++i) snapshot[i] = plot_ch[i];
+      frame.values[0] = trajectory_score::latest.yaw_ratio;
+      frame.values[1] = trajectory_score::latest.pitch_ratio;
+      frame.values[2] = plot_ch[0] * RAD_TO_DEG;
+      frame.values[3] = plot_ch[1] * RAD_TO_DEG;
+      frame.values[4] = plot_ch[5] * RAD_TO_DEG;
+      frame.values[5] = plot_ch[6] * RAD_TO_DEG;
+      frame.values[6] = tof_valid ? tof_distance_cm : -1.0f;
       taskEXIT_CRITICAL();
-      plotter.plot(
-        snapshot[0], snapshot[1], snapshot[2], snapshot[3], snapshot[4], snapshot[5], snapshot[6],
-        snapshot[7], snapshot[8], snapshot[9], snapshot[10], snapshot[11], snapshot[12], snapshot[13],
-        snapshot[14], snapshot[15], snapshot[16], snapshot[17]);
+      // SerialPlot固定帧头AA BB 1C，校验仅覆盖28字节浮点载荷。
+      frame.checksum = 0;
+      const auto * payload = reinterpret_cast<const uint8_t *>(frame.values);
+      for (unsigned i = 0; i < sizeof(frame.values); ++i) {
+        frame.checksum = static_cast<uint8_t>(frame.checksum + payload[i]);
+      }
+      HAL_UART_Transmit_DMA(&huart1, reinterpret_cast<uint8_t *>(&frame), sizeof(frame));
     }
-    osDelay(10);  // 100 Hz telemetry：921600 下实测丢帧 5.5%，减半发送量；控制与评分仍是 1 kHz
+    osDelay(10);
   }
 }
